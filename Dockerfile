@@ -12,18 +12,28 @@ FROM python:3.11-slim
 
 WORKDIR /workspace
 
-# System deps needed for wheels
-RUN apt-get update && apt-get install -y \
+# Install system dependencies once
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only requirements first (cache-friendly)
+# Optimize pip for speed
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Copy only requirements first
 COPY requirements.txt .
 
-# DO NOT use --upgrade
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --prefer-binary -r requirements.txt
+# Install heavy dependencies
+RUN pip install --prefer-binary -r requirements.txt
 
-# Copy app code last
+# Copy application code
 COPY . .
+
+# Ensure the app module is in path
+ENV PYTHONPATH=/workspace
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

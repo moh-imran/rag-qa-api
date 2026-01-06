@@ -279,6 +279,41 @@ Answer:"""
         
         return response
     
+    def _rephrase_question(self, messages: List[Dict[str, str]]) -> str:
+        """Rephrase the latest question based on conversation history for optimized retrieval"""
+        if len(messages) <= 1:
+            return messages[-1]['content']
+            
+        history_text = "\n".join([f"{m['role']}: {m['content']}" for m in messages[:-1]])
+        latest_question = messages[-1]['content']
+        
+        rephrase_prompt = f"""Given the following conversation history and a follow-up question, rephrase the follow-up question to be a standalone question that can be used for document retrieval. 
+Do NOT answer the question. Just return the rephrased question.
+
+History:
+{history_text}
+
+Follow-up Question: {latest_question}
+
+Standalone Question:"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.openai_model_name,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that rephrases questions for optimized search."},
+                    {"role": "user", "content": rephrase_prompt}
+                ],
+                max_tokens=200,
+                temperature=0
+            )
+            rephrased = response.choices[0].message.content.strip()
+            logger.info(f"Rephrased '{latest_question}' -> '{rephrased}'")
+            return rephrased
+        except Exception as e:
+            logger.error(f"Error rephrasing question: {e}")
+            return latest_question
+
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -287,18 +322,51 @@ Answer:"""
     ) -> Dict[str, Any]:
         """
         Chat interface with conversation history
-        
-        Args:
-            messages: List of conversation messages [{"role": "user", "content": "..."}]
-            top_k: Number of documents to retrieve
-            **kwargs: Additional arguments for query()
-            
-        Returns:
-            Dictionary with answer and sources
         """
-        # Get the latest user message
-        latest_message = messages[-1]['content']
+        # 1. Rephrase question for better retrieval
+        rephrased_query = self._rephrase_question(messages)
         
-        # For now, just process the latest message
-        # In future, can implement conversation memory
-        return self.query(latest_message, top_k=top_k, **kwargs)
+        # 2. Retrieve documents using rephrased query
+        query_embedding = self.embed_query(rephrased_query)
+        context_docs = self.retrieve_context(query_embedding, top_k=top_k)
+        
+        # 3. Build prompt with history and context
+        context_text = "\n\n".join([
+            f"[Doc {i+1}]: {doc['content']}" for i, doc in enumerate(context_docs)
+        ])
+        
+        system_msg = kwargs.get("system_instruction") or "You are a helpful AI assistant. Answer the user's question using the provided context and history."
+        
+        llm_messages = [
+            {"role": "system", "content": f"{system_msg}\n\nRetrieved Context:\n{context_text}"}
+        ]
+        
+        # Add conversation history
+        llm_messages.extend(messages)
+        
+        # 4. Generate answer
+        try:
+            response = self.client.chat.completions.create(
+                model=self.openai_model_name,
+                messages=llm_messages,
+                max_tokens=kwargs.get("max_tokens", 1000),
+                temperature=kwargs.get("temperature", 0.7)
+            )
+            
+            answer = response.choices[0].message.content
+            
+            return {
+                "answer": answer,
+                "context_used": len(context_docs) > 0,
+                "sources": [
+                    {
+                        "content": doc['content'][:200] + "...",
+                        "metadata": doc['metadata'],
+                        "score": doc.get('score', 0)
+                    }
+                    for doc in context_docs
+                ]
+            }
+        except Exception as e:
+            logger.error(f"Error in chat generation: {e}")
+            raise

@@ -36,6 +36,7 @@ class ChatRequest(BaseModel):
     top_k: int = Field(5, description="Number of documents to retrieve", ge=1, le=20)
     max_tokens: int = Field(1000, description="Maximum tokens to generate")
     temperature: float = Field(0.7, description="Sampling temperature")
+    system_instruction: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -80,18 +81,6 @@ async def query_documents(request: QueryRequest):
 async def chat(request: ChatRequest):
     """
     Chat with conversation history
-    
-    Example:
-    ```json
-    {
-        "messages": [
-            {"role": "user", "content": "What is AI?"},
-            {"role": "assistant", "content": "AI is..."},
-            {"role": "user", "content": "Tell me more"}
-        ],
-        "top_k": 5
-    }
-    ```
     """
     try:
         # Convert to dict format
@@ -101,7 +90,8 @@ async def chat(request: ChatRequest):
             messages=messages,
             top_k=request.top_k,
             max_tokens=request.max_tokens,
-            temperature=request.temperature
+            temperature=request.temperature,
+            system_instruction=request.system_instruction
         )
         
         return result
