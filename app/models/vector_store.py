@@ -38,7 +38,21 @@ class QdrantVectorStore:
         
         # Initialize client
         self.client = QdrantClient(host=host, port=port)
-        logger.info(f"Connected to Qdrant at {host}:{port}")
+        logger.info(f"Initialized Qdrant vector store: {host}:{port}/{collection_name}")
+    
+    def switch_collection(self, collection_name: str):
+        """Switch to a different collection"""
+        self.collection_name = collection_name
+        logger.info(f"Switched to collection: {collection_name}")
+    
+    def list_collections(self) -> List[str]:
+        """List all available collections"""
+        try:
+            collections = self.client.get_collections()
+            return [c.name for c in collections.collections]
+        except Exception as e:
+            logger.error(f"Error listing collections: {e}")
+            return []
     
     def create_collection(
         self,
@@ -47,11 +61,11 @@ class QdrantVectorStore:
         recreate: bool = False
     ):
         """
-        Create a collection in Qdrant
+        Create a collection in Qdrant with Hybrid Search (Dense + Sparse)
         
         Args:
-            vector_size: Dimension of embeddings (e.g., 384 for MiniLM)
-            distance: Distance metric (COSINE, EUCLID, DOT)
+            vector_size: Dimension of dense embeddings (e.g., 384)
+            distance: Distance metric for dense vectors
             recreate: If True, delete existing collection and create new one
         """
         try:
@@ -67,15 +81,24 @@ class QdrantVectorStore:
                     logger.info(f"Collection '{self.collection_name}' already exists")
                     return
             
-            # Create collection
+            # Create collection with named vectors (Hybrid)
+            from qdrant_client.models import SparseVectorParams, Modifier
+            
             self.client.create_collection(
                 collection_name=self.collection_name,
-                vectors_config=VectorParams(
-                    size=vector_size,
-                    distance=distance
-                )
+                vectors_config={
+                    "text-dense": VectorParams(
+                        size=vector_size,
+                        distance=distance
+                    )
+                },
+                sparse_vectors_config={
+                    "text-sparse": SparseVectorParams(
+                        modifier=Modifier.IDF
+                    )
+                }
             )
-            logger.info(f"✅ Created collection '{self.collection_name}' with vector size {vector_size}")
+            logger.info(f"✅ Created HYBRID collection '{self.collection_name}' (Dense: {vector_size}, Sparse: configured)")
             
         except Exception as e:
             logger.error(f"Error creating collection: {e}")
@@ -87,14 +110,11 @@ class QdrantVectorStore:
         batch_size: int = 100
     ) -> Dict[str, Any]:
         """
-        Store embedded chunks in Qdrant
+        Store embedded chunks in Qdrant with hybrid vectors
         
         Args:
-            embedded_chunks: List of chunks with embeddings from ETL pipeline
+            embedded_chunks: List of chunks with 'embedding' (dense) and 'sparse_embedding' (sparse)
             batch_size: Number of points to upload at once
-            
-        Returns:
-            Dictionary with storage statistics
         """
         if not embedded_chunks:
             logger.warning("No chunks to store")
@@ -104,9 +124,26 @@ class QdrantVectorStore:
             # Prepare points for Qdrant
             points = []
             for chunk in embedded_chunks:
+                # Basic validation
+                dense_vector = chunk.get('embedding')
+                sparse_vector = chunk.get('sparse_embedding')
+                
+                # Check if we have sparse vectors available
+                vector_dict = {}
+                if dense_vector:
+                    vector_dict["text-dense"] = dense_vector
+                
+                # Sparse vector format: {'indices': [...], 'values': [...]}
+                if sparse_vector:
+                    from qdrant_client.models import SparseVector
+                    vector_dict["text-sparse"] = SparseVector(
+                        indices=sparse_vector['indices'],
+                        values=sparse_vector['values']
+                    )
+                
                 point = PointStruct(
                     id=str(uuid.uuid4()),  # Generate unique ID
-                    vector=chunk['embedding'],
+                    vector=vector_dict,
                     payload={
                         'content': chunk['content'],
                         'metadata': chunk['metadata']
@@ -125,7 +162,7 @@ class QdrantVectorStore:
                 total_stored += len(batch)
                 logger.info(f"Stored batch {i//batch_size + 1}: {len(batch)} points")
             
-            logger.info(f"✅ Successfully stored {total_stored} vectors in Qdrant")
+            logger.info(f"✅ Successfully stored {total_stored} points in Qdrant")
             
             return {
                 "status": "success",
@@ -140,21 +177,20 @@ class QdrantVectorStore:
     def search(
         self,
         query_vector: List[float],
+        sparse_vector: Optional[Dict[str, List]] = None,
         limit: int = 5,
         score_threshold: Optional[float] = None,
         filter_dict: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Search for similar vectors in Qdrant
+        Hybrid Search (Dense + Sparse)
         
         Args:
-            query_vector: Embedding vector to search for
-            limit: Number of results to return
-            score_threshold: Minimum similarity score (0-1)
-            filter_dict: Optional metadata filters
-            
-        Returns:
-            List of matching documents with scores
+            query_vector: Dense embedding
+            sparse_vector: Sparse indices/values {'indices': [], 'values': []}
+            limit: Number of results
+            score_threshold: Min score
+            filter_dict: Metadata filters
         """
         try:
             # Build filter if provided
@@ -170,14 +206,53 @@ class QdrantVectorStore:
                     )
                 query_filter = Filter(must=conditions)
             
-            # Use query_points (Modern API)
-            response = self.client.query_points(
-                collection_name=self.collection_name,
-                query=query_vector,
-                limit=limit,
-                query_filter=query_filter,  # Correct argument for v1.10+
-                score_threshold=score_threshold
-            )
+            # Prepare Query (Hybrid if sparse available)
+            from qdrant_client.models import SparseVector
+            
+            if sparse_vector:
+                # Hybrid Query (Prefetch sparse, rescore with dense is common strategy, 
+                # OR simple weighted fusion supported in newer Qdrant)
+                
+                # Using simple fusion via query_points (requires newer Qdrant server)
+                # We will prefetch with sparse/dense and fuse.
+                # For simplicity in this implementation, we'll rely on Qdrant's automatic Prefetch fusion if passing multiple
+                # But actually, query_points expects a single query unless using Batch.
+                
+                # Let's perform a simple weighted search: pass named vector if we want specific one.
+                # But for true hybrid, we want to query BOTH.
+                
+                # Implementing simple hybrid strategy: Query Dense, but re-order? 
+                # No, best is to use Prefetch.
+                
+                from qdrant_client.models import Prefetch
+                
+                # Fetch more candidates with sparse, then rescore with dense
+                response = self.client.query_points(
+                    collection_name=self.collection_name,
+                    prefetch=Prefetch(
+                        query=SparseVector(
+                            indices=sparse_vector['indices'],
+                            values=sparse_vector['values']
+                        ),
+                        using="text-sparse",
+                        limit=limit * 2,
+                        filter=query_filter
+                    ),
+                    query=query_vector,
+                    using="text-dense",
+                    limit=limit,
+                    score_threshold=score_threshold
+                )
+            else:
+                # Standard Dense Search
+                response = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_vector,
+                    using="text-dense",
+                    limit=limit,
+                    query_filter=query_filter,
+                    score_threshold=score_threshold
+                )
             
             # Format results
             formatted_results = []

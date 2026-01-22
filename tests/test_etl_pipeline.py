@@ -1,4 +1,6 @@
 import pytest
+from unittest.mock import MagicMock, patch
+import torch
 from app.services.etl_pipeline import ETLPipeline
 
 
@@ -60,3 +62,20 @@ class TestETLPipeline:
         """Test getting embedding dimension"""
         dim = pipeline.get_embedding_dimension()
         assert dim == 384  # all-MiniLM-L6-v2 dimension
+
+    @pytest.mark.asyncio
+    async def test_semantic_chunking(self, pipeline):
+        """Test semantic chunking strategy"""
+        # Mock embedding logic or use simpler check
+        # Since we use sentence_transformers, it requires the model to actually run or be mocked
+        # mocking _split_text_semantically directly is safer for unit test
+        
+        with patch.object(pipeline, '_split_text_semantically') as mock_split:
+            mock_split.return_value = ["chunk1", "chunk2"]
+            
+            docs = [{"content": "sent1. sent2.", "metadata": {}}]
+            chunks = pipeline.chunk_documents(docs, strategy="semantic")
+            
+            assert len(chunks) == 2
+            assert chunks[0]["metadata"]["strategy"] == "semantic"
+            mock_split.assert_called_once()

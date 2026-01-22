@@ -1,8 +1,15 @@
 from typing import List, Dict, Any, Optional
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import util
+from fastembed import SparseTextEmbedding
+import numpy as np
 import logging
 from .data_sources.base import BaseDataSource
 from .data_sources.file_source import FileSource
+from .data_sources.web_source import WebSource
+from .data_sources.git_source import GitSource
+from .data_sources.notion_source import NotionSource
+from .data_sources.database_source import DatabaseSource
+from .embedding_providers import BaseEmbeddingProvider, create_embedding_provider
 from ..models.vector_store import QdrantVectorStore
 
 logger = logging.getLogger(__name__)
@@ -13,15 +20,23 @@ class ETLPipeline:
     
     def __init__(
         self,
+        embedding_provider: str = "huggingface",
         embedding_model: str = "all-MiniLM-L6-v2",
+        openai_api_key: str = None,
         qdrant_host: str = "localhost",
         qdrant_port: int = 6333,
         collection_name: str = "documents"
     ):
+        self.embedding_provider_type = embedding_provider
         self.embedding_model_name = embedding_model
-        self.embedding_model = None
+        self.embedding_provider = None
+        self.openai_api_key = openai_api_key
         self.data_sources = {
-            'file': FileSource()            
+            'file': FileSource(),
+            'web': WebSource(),
+            'git': GitSource()
+            # Note: Notion and Database sources require credentials, 
+            # so they should be registered dynamically via add_data_source()
         }
         
         # Initialize vector store
@@ -33,13 +48,6 @@ class ETLPipeline:
         
         logger.info("ETL Pipeline initialized")
     
-    def _load_embedding_model(self):
-        """Lazy load embedding model"""
-        if self.embedding_model is None:
-            logger.info(f"Loading embedding model: {self.embedding_model_name}")
-            self.embedding_model = SentenceTransformer(self.embedding_model_name)
-            logger.info(f"Model loaded. Dimension: {self.embedding_model.get_sentence_embedding_dimension()}")
-    
     async def run(
         self,
         source_type: str,
@@ -47,29 +55,19 @@ class ETLPipeline:
         chunk_overlap: int = 200,
         batch_size: int = 32,
         store_in_qdrant: bool = True,
+        chunking_strategy: str = "fixed",  # "fixed" or "semantic"
         **source_params
     ) -> Dict[str, Any]:
         """
         Run complete ETL pipeline
-        
-        Args:
-            source_type: Type of data source ('file', 'api', etc.)
-            chunk_size: Size of text chunks
-            chunk_overlap: Overlap between chunks
-            batch_size: Batch size for embedding
-            store_in_qdrant: If True, store vectors in Qdrant
-            **source_params: Parameters specific to the data source
-            
-        Returns:
-            Dictionary with pipeline results and statistics
         """
-        logger.info(f"Starting ETL pipeline with source: {source_type}")
+        logger.info(f"Starting ETL pipeline with source: {source_type}, strategy: {chunking_strategy}")
         
         # EXTRACT
         documents = await self.extract(source_type, **source_params)
         
         # TRANSFORM
-        chunks = self.chunk_documents(documents, chunk_size, chunk_overlap)
+        chunks = self.chunk_documents(documents, chunk_size, chunk_overlap, chunking_strategy)
         embedded_chunks = self.embed_chunks(chunks, batch_size)
         
         # LOAD (optional)
@@ -86,63 +84,34 @@ class ETLPipeline:
             "storage": storage_result
         }
         
-        logger.info(f"✅ ETL pipeline complete: {len(embedded_chunks)} embedded chunks")
+        logger.info(f"✅ ETL pipeline complete: {len(embedded_chunks)} processed chunks")
         return result
-    
-    async def extract(self, source_type: str, **params) -> List[Dict[str, Any]]:
-        """
-        EXTRACT phase: Get data from source
-        """
-        if source_type not in self.data_sources:
-            raise ValueError(f"Unknown source type: {source_type}. Available: {list(self.data_sources.keys())}")
-        
-        source = self.data_sources[source_type]
-        documents = await source.extract(**params)
-        
-        logger.info(f"📥 Extracted {len(documents)} documents from {source_type}")
-        return documents
-    
-    def chunk_documents(
-        self,
-        documents: List[Dict[str, Any]],
-        chunk_size: int = 1000,
-        chunk_overlap: int = 200
-    ) -> List[Dict[str, Any]]:
-        """
-        TRANSFORM phase: Chunk documents
-        """
-        all_chunks = []
-        
-        for doc in documents:
-            content = doc['content']
-            metadata = doc['metadata'].copy()
+
+    def _load_embedding_model(self):
+        """Lazy load embedding models (Dense + Sparse)"""
+        # Dense
+        if self.embedding_provider is None:
+            logger.info(f"Loading embedding provider: {self.embedding_provider_type}")
+            self.embedding_provider = create_embedding_provider(
+                provider_type=self.embedding_provider_type,
+                model_name=self.embedding_model_name,
+                api_key=self.openai_api_key
+            )
+            logger.info(f"Embedding provider loaded. Dimension: {self.embedding_provider.get_dimension()}")
             
-            # Split into chunks
-            text_chunks = self._split_text(content, chunk_size, chunk_overlap)
-            
-            # Add metadata
-            for idx, chunk_text in enumerate(text_chunks):
-                chunk = {
-                    'content': chunk_text,
-                    'metadata': {
-                        **metadata,
-                        'chunk_id': idx,
-                        'total_chunks': len(text_chunks),
-                        'chunk_size': len(chunk_text)
-                    }
-                }
-                all_chunks.append(chunk)
-        
-        logger.info(f"✂️  Created {len(all_chunks)} chunks from {len(documents)} documents")
-        return all_chunks
-    
+        # Sparse
+        if not hasattr(self, 'sparse_embedding_model') or self.sparse_embedding_model is None:
+            logger.info("Loading sparse embedding model: prithivida/Splade_PP_en_v1")
+            self.sparse_embedding_model = SparseTextEmbedding(model_name="prithivida/Splade_PP_en_v1")
+            logger.info("Sparse model loaded")
+
     def embed_chunks(
         self,
         chunks: List[Dict[str, Any]],
         batch_size: int = 32
     ) -> List[Dict[str, Any]]:
         """
-        TRANSFORM phase: Generate embeddings
+        TRANSFORM phase: Generate embeddings (Dense + Sparse)
         """
         if not chunks:
             return []
@@ -152,23 +121,46 @@ class ETLPipeline:
         texts = [chunk['content'] for chunk in chunks]
         
         logger.info(f"🔮 Generating embeddings for {len(texts)} chunks...")
-        embeddings = self.embedding_model.encode(
+        
+        # 1. Generate Dense Embeddings
+        dense_embeddings = self.embedding_provider.embed(
             texts,
             batch_size=batch_size,
-            show_progress_bar=True,
-            convert_to_numpy=True
+            show_progress_bar=True
         )
+        
+        # 2. Generate Sparse Embeddings
+        logger.info("Generating sparse embeddings...")
+        # yield from returns generator, convert to list
+        sparse_embeddings = list(self.sparse_embedding_model.embed(texts, batch_size=batch_size))
         
         # Add embeddings to chunks
         embedded_chunks = []
-        for chunk, embedding in zip(chunks, embeddings):
+        for i, chunk in enumerate(chunks):
+            # Sparse embedding object from fastembed usually has indices/values
+            # FastEmbed returns SparseEmbedding(values=..., indices=...) objects or dicts depending on version
+            # Assuming it conforms to expected structure or we extract it.
+            # sparse_embeddings[i] is typically a SparseEmbedding object.
+            
+            # Extract usable dict for Qdrant
+            # sparse_vector = sparse_embeddings[i]
+            # sparse_dict = {"indices": sparse_vector.indices.tolist(), "values": sparse_vector.values.tolist()}
+            
+            # Actually fastembed yields objects with .indices and .values (numpy arrays)
+            sparse_item = sparse_embeddings[i]
+            sparse_dict = {
+                "indices": sparse_item.indices.tolist(), 
+                "values": sparse_item.values.tolist()
+            }
+            
             embedded_chunk = {
                 **chunk,
-                'embedding': embedding.tolist()
+                'embedding': dense_embeddings[i].tolist(),
+                'sparse_embedding': sparse_dict
             }
             embedded_chunks.append(embedded_chunk)
         
-        logger.info(f"✅ Generated {len(embedded_chunks)} embeddings")
+        logger.info(f"✅ Generated {len(embedded_chunks)} hybrid embeddings")
         return embedded_chunks
     
     def _split_text(
@@ -248,4 +240,4 @@ class ETLPipeline:
     def get_embedding_dimension(self) -> int:
         """Get embedding dimension"""
         self._load_embedding_model()
-        return self.embedding_model.get_sentence_embedding_dimension()
+        return self.embedding_provider.get_dimension()
