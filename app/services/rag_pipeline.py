@@ -1,10 +1,15 @@
 from typing import List, Dict, Any, Optional
 import logging
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import CrossEncoder
+from fastembed import SparseTextEmbedding
 from openai import OpenAI
 import time
 import random
 from app.models.vector_store import QdrantVectorStore
+from app.services.embedding_providers import BaseEmbeddingProvider, create_embedding_provider
+from app.services.metrics_logger import metrics_logger
+from app.services.collection_router import CollectionRouter
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -14,27 +19,39 @@ class RAGPipeline:
     
     def __init__(
         self,
+        embedding_provider: str = "huggingface",
         embedding_model: str = "all-MiniLM-L6-v2",
+        cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         openai_api_key: str = None,
         openai_model: str = "gpt-4o-mini",
         qdrant_host: str = "localhost",
         qdrant_port: int = 6333,
-        collection_name: str = "documents"
+        collection_name: str = "documents",
+        collections: Optional[Dict[str, str]] = None
     ):
         """
         Initialize RAG pipeline
         
         Args:
-            embedding_model: Sentence transformer model name
+            embedding_provider: Embedding provider type (huggingface, openai)
+            embedding_model: Model name for embeddings
+            cross_encoder_model: Cross encoder model name for reranking
             openai_api_key: OpenAI API key
             openai_model: OpenAI model name (e.g., gpt-4o-mini)
             qdrant_host: Qdrant server host
             qdrant_port: Qdrant server port
             collection_name: Qdrant collection name
+            collections: Optional dict of collection names to descriptions for federated search
         """
+        self.embedding_provider_type = embedding_provider
         self.embedding_model_name = embedding_model
-        self.embedding_model = None
+        self.cross_encoder_model_name = cross_encoder_model
+        self.embedding_provider = None
+        self.cross_encoder_model = None
         self.openai_model_name = openai_model
+        self.openai_api_key = openai_api_key
+        self.qdrant_host = qdrant_host
+        self.qdrant_port = qdrant_port
         
         # Configure OpenAI
         if openai_api_key:
@@ -51,14 +68,48 @@ class RAGPipeline:
             collection_name=collection_name
         )
         
+        # Initialize collection router if multiple collections provided
+        if collections:
+            self.collection_router = CollectionRouter(
+                collections=collections,
+                openai_client=self.client
+            )
+            logger.info(f"Initialized with {len(collections)} collections for federated search")
+        else:
+            self.collection_router = None
+        
         logger.info("RAG Pipeline initialized")
     
-    def _load_embedding_model(self):
-        """Lazy load embedding model"""
-        if self.embedding_model is None:
-            logger.info(f"Loading embedding model: {self.embedding_model_name}")
-            self.embedding_model = SentenceTransformer(self.embedding_model_name)
+    def _load_models(self):
+        """Lazy load embedding and cross-encoder models"""
+        if self.embedding_provider is None:
+            logger.info(f"Loading embedding provider: {self.embedding_provider_type}")
+            self.embedding_provider = create_embedding_provider(
+                provider_type=self.embedding_provider_type,
+                model_name=self.embedding_model_name,
+                api_key=self.openai_api_key
+            )
+        
+        if self.cross_encoder_model is None:
+            logger.info(f"Loading cross-encoder model: {self.cross_encoder_model_name}")
+            self.cross_encoder_model = CrossEncoder(self.cross_encoder_model_name)
+            
+        if not hasattr(self, 'sparse_embedding_model') or self.sparse_embedding_model is None:
+            logger.info("Loading sparse embedding model: prithivida/Splade_PP_en_v1")
+            self.sparse_embedding_model = SparseTextEmbedding(model_name="prithivida/Splade_PP_en_v1")
     
+    def embed_query_sparse(self, query: str) -> Dict[str, List]:
+        """Convert query to sparse vector"""
+        self._load_models()
+        # embed returns generator, take first item for single query
+        sparse_gen = self.sparse_embedding_model.embed([query])
+        sparse_vec = list(sparse_gen)[0]
+        
+        return {
+            "indices": sparse_vec.indices.tolist(),
+            "values": sparse_vec.values.tolist()
+        }
+
     def embed_query(self, query: str) -> List[float]:
         """
         Convert query text to embedding vector
@@ -69,40 +120,124 @@ class RAGPipeline:
         Returns:
             Embedding vector as list of floats
         """
-        self._load_embedding_model()
+        self._load_models()
         
-        embedding = self.embedding_model.encode(
-            query,
-            convert_to_numpy=True
-        )
+        embedding = self.embedding_provider.embed(query)
+        
+        # Handle both single and batch embeddings
+        if len(embedding.shape) > 1:
+            embedding = embedding[0]
         
         return embedding.tolist()
     
-    def retrieve_context(
-        self,
-        query_embedding: List[float],
-        top_k: int = 5,
-        score_threshold: Optional[float] = None
-    ) -> List[Dict[str, Any]]:
+    def _generate_hypothetical_document(self, query: str) -> str:
         """
-        Retrieve relevant documents from vector store
+        Generate a hypothetical answer using HyDE (Hypothetical Document Embeddings)
         
         Args:
+            query: User question
+            
+        Returns:
+            Hypothetical answer that can be embedded for better retrieval
+        """
+        if not self.client:
+            logger.warning("HyDE requires OpenAI client, falling back to original query")
+            return query
+            
+        hyde_prompt = f"""Write a detailed, factual answer to the following question as if you were writing a paragraph from a relevant document. Do not include phrases like "The answer is" or "According to". Just write the content directly.
+
+Question: {query}
+
+Answer:"""
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.openai_model_name,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that generates hypothetical document passages."},
+                    {"role": "user", "content": hyde_prompt}
+                ],
+                max_tokens=200,
+                temperature=0.7
+            )
+            
+            hypothetical_doc = response.choices[0].message.content.strip()
+            logger.info(f"Generated HyDE document ({len(hypothetical_doc)} chars)")
+            return hypothetical_doc
+            
+        except Exception as e:
+            logger.error(f"Error generating HyDE: {e}")
+            return query
+    
+    def retrieve_context(
+        self,
+        query: str,
+        query_embedding: List[float],
+        top_k: int = 5,
+        score_threshold: Optional[float] = None,
+        metadata_filters: Optional[Dict[str, Any]] = None,
+        use_hyde: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve relevant documents from vector store and rerank them
+        
+        Args:
+            query: Original user question
             query_embedding: Query embedding vector
-            top_k: Number of documents to retrieve
-            score_threshold: Minimum similarity score
+            top_k: Number of documents to return after reranking
+            score_threshold: Minimum similarity score for initial retrieval
+            metadata_filters: Optional metadata filters (e.g., {"filename": "doc.pdf"})
+            use_hyde: If True, use HyDE for improved retrieval
             
         Returns:
             List of relevant documents with metadata
         """
+        # 0. HyDE: Generate hypothetical document if enabled
+        if use_hyde:
+            hypothetical_doc = self._generate_hypothetical_document(query)
+            # Re-embed using hypothetical document
+            query_embedding = self.embed_query(hypothetical_doc)
+            logger.info("Using HyDE embedding for retrieval")
+        
+        # 1. Generate Sparse Vector for Hybrid Search
+        sparse_vector = self.embed_query_sparse(query)
+        
+        # 2. Initial Retrieval (Fetch more candidates for reranking)
+        initial_top_k = top_k * 3
         results = self.vector_store.search(
             query_vector=query_embedding,
-            limit=top_k,
-            score_threshold=score_threshold
+            sparse_vector=sparse_vector,
+            limit=initial_top_k,
+            score_threshold=score_threshold,
+            filter_dict=metadata_filters
         )
         
-        logger.info(f"Retrieved {len(results)} documents")
-        return results
+        if not results:
+            return []
+            
+        logger.info(f"Initial retrieval: {len(results)} documents")
+        
+        # 2. Reranking
+        self._load_models()
+        
+        # Prepare pairs for cross-encoder
+        pairs = [[query, doc['content']] for doc in results]
+        
+        # Predict scores
+        cross_scores = self.cross_encoder_model.predict(pairs)
+        
+        # Attach new scores and sort
+        for doc, score in zip(results, cross_scores):
+            doc['score'] = float(score)  # Update score with reranker score
+            
+        # Sort by reranker score (descending)
+        results.sort(key=lambda x: x['score'], reverse=True)
+        
+        # 3. Return top_k
+        final_results = results[:top_k]
+        logger.info(f"Reranked top {len(final_results)} documents")
+        
+        return final_results
     
     def build_prompt(
         self,
@@ -211,6 +346,47 @@ Answer:"""
                 logger.error(f"Error generating answer: {e}")
                 raise
     
+    def generate_answer_stream(
+        self,
+        prompt: str,
+        max_tokens: int = 1000,
+        temperature: float = 0.7
+    ):
+        """
+        Generate answer using OpenAI LLM with streaming
+        
+        Args:
+            prompt: Formatted prompt with context
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature (0-1)
+            
+        Yields:
+            Tokens as they are generated
+        """
+        if not self.client:
+            raise ValueError("OpenAI API key not configured")
+        
+        try:
+            # Generate response using OpenAI Chat Completion with streaming
+            stream = self.client.chat.completions.create(
+                model=self.openai_model_name,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant that answers questions based on provided context."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=True
+            )
+            
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                    
+        except Exception as e:
+            logger.error(f"Error generating streaming answer: {e}")
+            raise
+    
     def query(
         self,
         question: str,
@@ -219,7 +395,11 @@ Answer:"""
         system_instruction: Optional[str] = None,
         max_tokens: int = 1000,
         temperature: float = 0.7,
-        return_sources: bool = True
+        return_sources: bool = True,
+        metadata_filters: Optional[Dict[str, Any]] = None,
+        use_hyde: bool = False,
+        routing_strategy: Optional[str] = None,
+        specific_collections: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Complete RAG query pipeline
@@ -232,20 +412,43 @@ Answer:"""
             max_tokens: Maximum tokens for answer
             temperature: LLM temperature
             return_sources: Whether to return source documents
+            metadata_filters: Optional metadata filters (e.g., {"filename": "doc.pdf"})
+            use_hyde: If True, use HyDE for improved retrieval
+            routing_strategy: "auto", "all", or "specific" (for federated search)
+            specific_collections: List of collection names (when routing_strategy="specific")
             
         Returns:
             Dictionary with answer and optional sources
         """
         logger.info(f"Processing query: {question}")
         
+        # Federated search if collection router is available
+        if self.collection_router and routing_strategy:
+            return self._federated_query(
+                question=question,
+                top_k=top_k,
+                score_threshold=score_threshold,
+                system_instruction=system_instruction,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                return_sources=return_sources,
+                metadata_filters=metadata_filters,
+                use_hyde=use_hyde,
+                routing_strategy=routing_strategy,
+                specific_collections=specific_collections
+            )
+        
         # Step 1: Embed query
         query_embedding = self.embed_query(question)
         
         # Step 2: Retrieve relevant documents
         context_docs = self.retrieve_context(
+            question,
             query_embedding,
             top_k=top_k,
-            score_threshold=score_threshold
+            score_threshold=score_threshold,
+            metadata_filters=metadata_filters,
+            use_hyde=use_hyde
         )
         
         if not context_docs:
@@ -277,7 +480,177 @@ Answer:"""
                 for doc in context_docs
             ]
         
+        # Log metrics
+        query_id = str(uuid.uuid4())
+        response["query_id"] = query_id
+        
+        try:
+            metrics_logger.log_query(
+                query_id=query_id,
+                question=question,
+                retrieved_docs=context_docs,
+                answer=answer,
+                metadata={
+                    "top_k": top_k,
+                    "use_hyde": use_hyde,
+                    "metadata_filters": metadata_filters
+                }
+            )
+        except Exception as e:
+            logger.warning(f"Failed to log metrics: {e}")
+        
         return response
+    
+    def _federated_query(
+        self,
+        question: str,
+        top_k: int,
+        score_threshold: Optional[float],
+        system_instruction: Optional[str],
+        max_tokens: int,
+        temperature: float,
+        return_sources: bool,
+        metadata_filters: Optional[Dict[str, Any]],
+        use_hyde: bool,
+        routing_strategy: str,
+        specific_collections: Optional[List[str]]
+    ) -> Dict[str, Any]:
+        """Execute federated search across multiple collections"""
+        # Route query to determine which collections to search
+        target_collections = self.collection_router.route_query(
+            query=question,
+            strategy=routing_strategy,
+            specific_collections=specific_collections
+        )
+        
+        logger.info(f"Federated search across collections: {target_collections}")
+        
+        # Query each collection
+        results_by_collection = {}
+        original_collection = self.vector_store.collection_name
+        
+        try:
+            for collection_name in target_collections:
+                self.vector_store.switch_collection(collection_name)
+                query_embedding = self.embed_query(question)
+                context_docs = self.retrieve_context(
+                    question, query_embedding, top_k=top_k,
+                    score_threshold=score_threshold,
+                    metadata_filters=metadata_filters,
+                    use_hyde=use_hyde
+                )
+                results_by_collection[collection_name] = context_docs
+            
+            merged_docs = self.collection_router.merge_results(results_by_collection, top_k=top_k)
+        finally:
+            self.vector_store.switch_collection(original_collection)
+        
+        if not merged_docs:
+            return {
+                "answer": "I couldn't find any relevant information to answer your question.",
+                "sources": [],
+                "context_used": False,
+                "collections_queried": target_collections
+            }
+        
+        prompt = self.build_prompt(question, merged_docs, system_instruction)
+        answer = self.generate_answer(prompt, max_tokens, temperature)
+        
+        response = {
+            "answer": answer,
+            "context_used": True,
+            "collections_queried": target_collections
+        }
+        
+        if return_sources:
+            response["sources"] = [
+                {"content": doc['content'][:200] + "...", "metadata": doc['metadata'], "score": doc.get('score', 0)}
+                for doc in merged_docs
+            ]
+        
+        query_id = str(uuid.uuid4())
+        response["query_id"] = query_id
+        
+        try:
+            metrics_logger.log_query(query_id=query_id, question=question, retrieved_docs=merged_docs, answer=answer,
+                metadata={"top_k": top_k, "use_hyde": use_hyde, "routing_strategy": routing_strategy, "collections_queried": target_collections})
+        except Exception as e:
+            logger.warning(f"Failed to log metrics: {e}")
+        
+        return response
+    
+    def query_stream(
+        self,
+        question: str,
+        top_k: int = 5,
+        score_threshold: Optional[float] = None,
+        system_instruction: Optional[str] = None,
+        max_tokens: int = 1000,
+        temperature: float = 0.7,
+        metadata_filters: Optional[Dict[str, Any]] = None,
+        use_hyde: bool = False
+    ):
+        """
+        Complete RAG query pipeline with streaming
+        
+        Yields:
+            Dict events with type and data
+        """
+        import json
+        
+        logger.info(f"Processing streaming query: {question}")
+        
+        # Yield retrieval start event
+        yield {"type": "retrieval_start", "data": {"question": question}}
+        
+        # Step 1: Embed query
+        query_embedding = self.embed_query(question)
+        
+        # Step 2: Retrieve relevant documents
+        context_docs = self.retrieve_context(
+            question,
+            query_embedding,
+            top_k=top_k,
+            score_threshold=score_threshold,
+            metadata_filters=metadata_filters,
+            use_hyde=use_hyde
+        )
+        
+        # Yield retrieval complete event
+        yield {
+            "type": "retrieval_complete",
+            "data": {
+                "num_docs": len(context_docs),
+                "sources": [
+                    {
+                        "content": doc['content'][:200] + "...",
+                        "metadata": doc['metadata'],
+                        "score": doc.get('score', 0)
+                    }
+                    for doc in context_docs
+                ] if context_docs else []
+            }
+        }
+        
+        if not context_docs:
+            yield {
+                "type": "error",
+                "data": {"message": "No relevant documents found"}
+            }
+            return
+        
+        # Step 3: Build prompt
+        prompt = self.build_prompt(question, context_docs, system_instruction)
+        
+        # Yield generation start event
+        yield {"type": "generation_start", "data": {}}
+        
+        # Step 4: Generate answer with streaming
+        for token in self.generate_answer_stream(prompt, max_tokens, temperature):
+            yield {"type": "token", "data": {"content": token}}
+        
+        # Yield done event
+        yield {"type": "done", "data": {}}
     
     def _rephrase_question(self, messages: List[Dict[str, str]]) -> str:
         """Rephrase the latest question based on conversation history for optimized retrieval"""
@@ -318,17 +691,32 @@ Standalone Question:"""
         self,
         messages: List[Dict[str, str]],
         top_k: int = 5,
+        metadata_filters: Optional[Dict[str, Any]] = None,
+        use_hyde: bool = False,
         **kwargs
     ) -> Dict[str, Any]:
         """
         Chat interface with conversation history
+        
+        Args:
+            messages: Conversation history
+            top_k: Number of documents to retrieve
+            metadata_filters: Optional metadata filters
+            use_hyde: If True, use HyDE for improved retrieval
+            **kwargs: Additional parameters
         """
         # 1. Rephrase question for better retrieval
         rephrased_query = self._rephrase_question(messages)
         
         # 2. Retrieve documents using rephrased query
         query_embedding = self.embed_query(rephrased_query)
-        context_docs = self.retrieve_context(query_embedding, top_k=top_k)
+        context_docs = self.retrieve_context(
+            rephrased_query,
+            query_embedding,
+            top_k=top_k,
+            metadata_filters=metadata_filters,
+            use_hyde=use_hyde
+        )
         
         # 3. Build prompt with history and context
         context_text = "\n\n".join([

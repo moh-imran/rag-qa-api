@@ -4,7 +4,7 @@ import os
 
 from app.services.etl_pipeline import ETLPipeline
 from app.services.rag_pipeline import RAGPipeline
-from app.routers import ingestion, search, collection, chat
+from app.routers import ingestion, search, collection, chat, evaluation
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -16,8 +16,14 @@ app = FastAPI(
 )
 
 # Initialize ETL Pipeline
+embedding_provider = os.getenv("EMBEDDING_PROVIDER", "huggingface")
+embedding_model = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
 etl_pipeline = ETLPipeline(
-    embedding_model="all-MiniLM-L6-v2",
+    embedding_provider=embedding_provider,
+    embedding_model=embedding_model,
+    openai_api_key=openai_api_key,
     qdrant_host="qdrant",
     qdrant_port=6333,
     collection_name="documents"
@@ -25,8 +31,10 @@ etl_pipeline = ETLPipeline(
 
 # Initialize RAG Pipeline
 rag_pipeline = RAGPipeline(
-    embedding_model="all-MiniLM-L6-v2",
-    openai_api_key=os.getenv("OPENAI_API_KEY"),
+    embedding_provider=embedding_provider,
+    embedding_model=embedding_model,
+    cross_encoder_model=os.getenv("CROSS_ENCODER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+    openai_api_key=openai_api_key,
     openai_model="gpt-4o-mini",
     qdrant_host="qdrant",
     qdrant_port=6333,
@@ -38,12 +46,14 @@ ingestion.set_etl_pipeline(etl_pipeline)
 search.set_etl_pipeline(etl_pipeline)
 collection.set_etl_pipeline(etl_pipeline)
 chat.set_rag_pipeline(rag_pipeline)
+evaluation.set_qa_evaluator(rag_pipeline.client)
 
-# Include routers
+# Register routers
 app.include_router(ingestion.router)
 app.include_router(search.router)
 app.include_router(collection.router)
 app.include_router(chat.router)
+app.include_router(evaluation.router)
 
 
 @app.get("/")
