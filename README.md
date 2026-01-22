@@ -69,6 +69,8 @@ Explore the interactive API documentation at `http://localhost:8000/docs`.
 ### Ingestion
 - `POST /ingest/file`: Ingest documents from a local file path or directory.
 - `POST /ingest/upload`: Upload and ingest a single file.
+ - `POST /ingest/run`: Generic synchronous ingestion entrypoint. Body: `source_type`, `source_params`, `chunk_size`, `chunk_overlap`, `batch_size`, `store_in_qdrant`.
+ - `POST /ingest/submit`: Submit an asynchronous ingest job (returns `job_id`). Use `/ingest/status/{job_id}` to poll and `/ingest/jobs` to list recent jobs.
 
 ### Chat & Q&A
 - `POST /chat/query`: Ask a question based on ingested documents.
@@ -103,3 +105,24 @@ Run tests using pytest:
 ```bash
 pytest
 ```
+
+## 🔌 New Data Source Connectors
+
+This project includes minimal connectors for additional enterprise sources:
+
+- Confluence (Atlassian Cloud): `app/services/data_sources/confluence_source.py` — submit a job with `source_type: 'confluence'` and `source_params: { base_url, email, api_token, space_key? or content_id? }`.
+- SharePoint (Microsoft Graph): `app/services/data_sources/sharepoint_source.py` — submit a job with `source_type: 'sharepoint'` and `source_params: { site_id, access_token }`.
+
+Notes:
+- Confluence connector expects a Cloud site URL and an API token for a user. It fetches storage-format HTML and strips tags.
+- SharePoint connector uses a Microsoft Graph access token. It currently downloads simple text-like files (txt, md, html). Extend for `.docx`/`.pdf` if needed.
+
+## 🧾 Job Persistence
+
+If you want ingest jobs to persist across restarts, set `MONGODB_URL` in your environment and install `motor` and `beanie` (they are included in `requirements.txt`). Example:
+
+```env
+MONGODB_URL=mongodb://localhost:27017/rag_qa
+```
+
+When `MONGODB_URL` is set, the API will persist job metadata/results to the `ingest_jobs` collection and expose `/ingest/jobs` and `/ingest/status/{job_id}` endpoints.

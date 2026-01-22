@@ -1,6 +1,12 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Dict, Any
+from ..services.data_sources.notion_source import NotionSource
+from ..services.data_sources.database_source import DatabaseSource
+from ..services.data_sources.confluence_source import ConfluenceSource
+from ..services.data_sources.sharepoint_source import SharePointSource
+from ..services.ingest_jobs import manager as job_manager
+from ..services.ingest_jobs import manager as job_manager
 from pathlib import Path
 import tempfile
 import os
@@ -58,6 +64,185 @@ async def ingest_file(request: IngestFileRequest):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class IngestRunRequest(BaseModel):
+    source_type: str = Field(..., description="Type of data source e.g. file, web, git, notion, database")
+    source_params: Dict[str, Any] = Field(default_factory=dict, description="Parameters specific to the source_type")
+    chunk_size: int = Field(1000, description="Size of text chunks")
+    chunk_overlap: int = Field(200, description="Overlap between chunks")
+    batch_size: int = Field(32, description="Batch size for embedding")
+    store_in_qdrant: bool = Field(True, description="Store vectors in Qdrant")
+
+
+@router.post('/run', response_model=IngestResponse)
+async def ingest_run(request: IngestRunRequest):
+    """Generic ingestion endpoint that delegates to the ETL pipeline for any registered source."""
+    try:
+        # Merge chunking/storage params into source params
+        params = dict(request.source_params or {})
+        params.update({
+            'chunk_size': request.chunk_size,
+            'chunk_overlap': request.chunk_overlap,
+            'batch_size': request.batch_size,
+            'store_in_qdrant': request.store_in_qdrant
+        })
+
+        # If integration_id provided, resolve it to actual credentials and merge
+        integration_id = params.pop('integration_id', None)
+        if integration_id:
+            try:
+                from .integrations import get_decrypted_config
+                cfg = await get_decrypted_config(integration_id)
+                if cfg:
+                    for k, v in cfg.items():
+                        if k not in params or not params.get(k):
+                            params[k] = v
+            except Exception:
+                pass
+
+        # If the request requires dynamic data source registration (Notion, Database), register it
+        if request.source_type == 'notion':
+            api_key = params.pop('api_key', None)
+            if not api_key:
+                raise HTTPException(status_code=400, detail="Missing 'api_key' for Notion source")
+            notion_src = NotionSource(api_key=api_key)
+            etl_pipeline.add_data_source('notion', notion_src)
+
+        if request.source_type == 'database':
+            # Expected params: host, port, database, user, password, db_type
+            db_type = params.pop('db_type', 'postgresql')
+            host = params.pop('host', None)
+            port = params.pop('port', 5432)
+            database = params.pop('database', None)
+            user = params.pop('user', None)
+            password = params.pop('password', None)
+            if not database or not host:
+                raise HTTPException(status_code=400, detail="Missing database connection parameters")
+            db_src = DatabaseSource(db_type=db_type, host=host, port=port, database=database, user=user, password=password)
+            etl_pipeline.add_data_source('database', db_src)
+
+        result = await etl_pipeline.run(
+            source_type=request.source_type,
+            **params
+        )
+
+        return IngestResponse(
+            status="success",
+            message=f"Successfully processed source {request.source_type}",
+            total_documents=result['total_documents'],
+            total_chunks=result['total_chunks'],
+            embedding_dimension=result['embedding_dimension'],
+            stored_vectors=result['storage']['stored'] if result.get('storage') else None
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+class IngestSubmitRequest(BaseModel):
+    source_type: str
+    source_params: Dict[str, Any] = Field(default_factory=dict)
+    chunk_size: int = Field(1000)
+    chunk_overlap: int = Field(200)
+    batch_size: int = Field(32)
+    store_in_qdrant: bool = Field(True)
+
+
+@router.post('/submit')
+async def ingest_submit(request: IngestSubmitRequest):
+    """Submit an asynchronous ingest job. Returns `job_id` immediately."""
+    try:
+        params = dict(request.source_params or {})
+
+        # If integration_id provided, resolve it to actual credentials and merge
+        integration_id = params.pop('integration_id', None)
+        if integration_id:
+            try:
+                from .integrations import get_decrypted_config
+                cfg = await get_decrypted_config(integration_id)
+                if cfg:
+                    for k, v in cfg.items():
+                        if k not in params or not params.get(k):
+                            params[k] = v
+            except Exception:
+                pass
+
+        # dynamic registration for credentials
+        if request.source_type == 'notion':
+            api_key = params.pop('api_key', None)
+            if not api_key:
+                raise HTTPException(status_code=400, detail="Missing 'api_key' for Notion source")
+            etl_pipeline.add_data_source('notion', NotionSource(api_key=api_key))
+
+        if request.source_type == 'database':
+            db_type = params.pop('db_type', 'postgresql')
+            host = params.pop('host', None)
+            port = params.pop('port', 5432)
+            database = params.pop('database', None)
+            user = params.pop('user', None)
+            password = params.pop('password', None)
+            if not database or not host:
+                raise HTTPException(status_code=400, detail="Missing database connection parameters")
+            etl_pipeline.add_data_source('database', DatabaseSource(db_type=db_type, host=host, port=port, database=database, user=user, password=password))
+
+        if request.source_type == 'confluence':
+            base_url = params.pop('base_url', None)
+            email = params.pop('email', None)
+            api_token = params.pop('api_token', None)
+            if not base_url or not email or not api_token:
+                raise HTTPException(status_code=400, detail="Missing Confluence credentials (base_url, email, api_token)")
+            etl_pipeline.add_data_source('confluence', ConfluenceSource(base_url=base_url, email=email, api_token=api_token))
+
+        if request.source_type == 'sharepoint':
+            access_token = params.pop('access_token', None)
+            site_id = params.pop('site_id', None)
+            if not access_token or not site_id:
+                raise HTTPException(status_code=400, detail="Missing SharePoint parameters (access_token, site_id)")
+            etl_pipeline.add_data_source('sharepoint', SharePointSource(access_token=access_token, site_id=site_id))
+
+        # wrapper coroutine to run ETL
+        async def _run_job():
+            return await etl_pipeline.run(
+                source_type=request.source_type,
+                chunk_size=request.chunk_size,
+                chunk_overlap=request.chunk_overlap,
+                batch_size=request.batch_size,
+                store_in_qdrant=request.store_in_qdrant,
+                **params
+            )
+
+        job_id = await job_manager.submit(_run_job, job_meta={"source_type": request.source_type, "params": request.source_params})
+        return {"job_id": job_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get('/status/{job_id}')
+async def ingest_status(job_id: str):
+    status = await job_manager.get_status(job_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return status
+
+
+@router.get('/jobs')
+async def ingest_jobs_list(limit: int = 50):
+    jobs = await job_manager.list_jobs(limit=limit)
+    return {"jobs": jobs}
+
+
+@router.get('/jobs/{job_id}/logs')
+async def ingest_job_logs(job_id: str):
+    status = await job_manager.get_status(job_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # status contains 'result' and we added 'logs' via Job document
+    return {"job_id": job_id, "logs": status.get('result') and status.get('result').get('logs') or status.get('logs') or []}
 
 
 @router.post("/upload")
