@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
 import logging
 import json
+import uuid
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -89,8 +90,9 @@ async def query_documents(request: QueryRequest):
 async def query_documents_stream(request: QueryRequest):
     """
     Query documents with streaming response
-    
+
     Returns Server-Sent Events (SSE) stream with:
+    - conversation_id: Query ID for feedback tracking
     - retrieval_start: Retrieval begins
     - retrieval_complete: Documents retrieved
     - generation_start: Answer generation begins
@@ -99,6 +101,10 @@ async def query_documents_stream(request: QueryRequest):
     """
     try:
         async def event_generator():
+            # Generate a unique query_id for this request
+            query_id = str(uuid.uuid4())
+            yield f"data: {json.dumps({'type': 'conversation_id', 'conversation_id': query_id})}\n\n"
+
             for event in rag_pipeline.query_stream(
                 question=request.question,
                 top_k=request.top_k,
@@ -111,7 +117,7 @@ async def query_documents_stream(request: QueryRequest):
             ):
                 # Format as Server-Sent Event
                 yield f"data: {json.dumps(event)}\n\n"
-        
+
         return StreamingResponse(
             event_generator(),
             media_type="text/event-stream",
@@ -121,7 +127,7 @@ async def query_documents_stream(request: QueryRequest):
                 "X-Accel-Buffering": "no"
             }
         )
-        
+
     except Exception as e:
         logger.error(f"Error processing streaming query: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -157,17 +163,21 @@ async def chat(request: ChatRequest):
 async def chat_stream(request: ChatRequest):
     """
     Chat with streaming response
-    
+
     Returns Server-Sent Events (SSE) stream
     """
     try:
         async def event_generator():
+            # Generate a unique query_id for this request
+            query_id = str(uuid.uuid4())
+            yield f"data: {json.dumps({'type': 'conversation_id', 'conversation_id': query_id})}\n\n"
+
             # Convert to dict format
             messages = [msg.dict() for msg in request.messages]
-            
+
             # Get last message as question for streaming
             last_message = messages[-1]['content']
-            
+
             for event in rag_pipeline.query_stream(
                 question=last_message,
                 top_k=request.top_k,
@@ -177,7 +187,7 @@ async def chat_stream(request: ChatRequest):
                 use_hyde=request.use_hyde
             ):
                 yield f"data: {json.dumps(event)}\n\n"
-        
+
         return StreamingResponse(
             event_generator(),
             media_type="text/event-stream",
@@ -187,7 +197,7 @@ async def chat_stream(request: ChatRequest):
                 "X-Accel-Buffering": "no"
             }
         )
-        
+
     except Exception as e:
         logger.error(f"Error in streaming chat: {e}")
         raise HTTPException(status_code=500, detail=str(e))

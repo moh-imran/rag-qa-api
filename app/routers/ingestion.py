@@ -117,8 +117,18 @@ async def ingest_run(request: IngestRunRequest):
             database = params.pop('database', None)
             user = params.pop('user', None)
             password = params.pop('password', None)
-            if not database or not host:
-                raise HTTPException(status_code=400, detail="Missing database connection parameters")
+            collection = params.get('collection') or params.get('table')  # For MongoDB
+
+            # Auto-detect MongoDB from connection string
+            if host and host.startswith('mongodb://'):
+                db_type = 'mongodb'
+                if not database:
+                    database = 'test'
+                if not collection:
+                    raise HTTPException(status_code=400, detail="Missing 'collection' (or 'table') name for MongoDB")
+            elif not database or not host:
+                raise HTTPException(status_code=400, detail="Missing database connection parameters (host, database)")
+
             db_src = DatabaseSource(db_type=db_type, host=host, port=port, database=database, user=user, password=password)
             etl_pipeline.add_data_source('database', db_src)
 
@@ -184,8 +194,19 @@ async def ingest_submit(request: IngestSubmitRequest):
             database = params.pop('database', None)
             user = params.pop('user', None)
             password = params.pop('password', None)
-            if not database or not host:
-                raise HTTPException(status_code=400, detail="Missing database connection parameters")
+            collection = params.get('collection') or params.get('table')  # For MongoDB
+
+            # Auto-detect MongoDB from connection string
+            if host and host.startswith('mongodb://'):
+                db_type = 'mongodb'
+                if not database:
+                    # Try to extract database from connection string or use default
+                    database = 'test'
+                if not collection:
+                    raise HTTPException(status_code=400, detail="Missing 'collection' (or 'table') name for MongoDB")
+            elif not database or not host:
+                raise HTTPException(status_code=400, detail="Missing database connection parameters (host, database)")
+
             etl_pipeline.add_data_source('database', DatabaseSource(db_type=db_type, host=host, port=port, database=database, user=user, password=password))
 
         if request.source_type == 'confluence':
@@ -253,39 +274,57 @@ async def ingest_upload(
     batch_size: int = 32,
     store_in_qdrant: bool = True
 ):
-    """Upload and ingest a single file"""
+    """Upload and ingest a single file - creates a job for tracking"""
     try:
         file_ext = Path(file.filename).suffix.lower()
         if file_ext not in {'.txt', '.pdf', '.docx', '.md'}:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_ext}")
-        
+
+        # Save file to temp location
         with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
             content = await file.read()
             tmp_file.write(content)
             tmp_path = tmp_file.name
-        
-        try:
-            result = await etl_pipeline.run(
-                source_type='file',
-                file_path=tmp_path,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                batch_size=batch_size,
-                store_in_qdrant=store_in_qdrant
-            )
-            
-            return {
-                "status": "success",
-                "message": f"Successfully processed {file.filename}",
-                "filename": file.filename,
-                "total_documents": result['total_documents'],
-                "total_chunks": result['total_chunks'],
-                "embedding_dimension": result['embedding_dimension'],
-                "stored_vectors": result['storage']['stored'] if result.get('storage') else None
-            }
-        finally:
-            os.unlink(tmp_path)
-            
+
+        filename = file.filename
+
+        # Create async job for processing
+        async def _run_upload_job():
+            try:
+                result = await etl_pipeline.run(
+                    source_type='file',
+                    file_path=tmp_path,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    batch_size=batch_size,
+                    store_in_qdrant=store_in_qdrant
+                )
+                return {
+                    "status": "success",
+                    "message": f"Successfully processed {filename}",
+                    "filename": filename,
+                    "total_documents": result['total_documents'],
+                    "total_chunks": result['total_chunks'],
+                    "embedding_dimension": result['embedding_dimension'],
+                    "stored_vectors": result['storage']['stored'] if result.get('storage') else None
+                }
+            finally:
+                # Clean up temp file
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+
+        job_id = await job_manager.submit(
+            _run_upload_job,
+            job_meta={"source_type": "file", "filename": filename}
+        )
+
+        return {
+            "status": "processing",
+            "job_id": job_id,
+            "message": f"File {filename} uploaded and processing started",
+            "filename": filename
+        }
+
     except HTTPException:
         raise
     except Exception as e:

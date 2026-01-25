@@ -9,6 +9,7 @@ from app.routers import integrations
 from beanie import init_beanie
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.models.job import Job
+from app.models.integration import Integration
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,10 +24,10 @@ app = FastAPI(
 @app.on_event("startup")
 async def startup_event():
     # Initialize MongoDB / Beanie for job persistence (optional - if MONGODB_URL provided)
-    mongodb_url = os.getenv("MONGODB_URL", None)
+    mongodb_url = os.getenv("MONGODB_URL", "mongodb://mongodb:27017/rag_chat")
     if mongodb_url:
         client = AsyncIOMotorClient(mongodb_url)
-        await init_beanie(database=client.get_default_database(), document_models=[Job])
+        await init_beanie(database=client.get_default_database(), document_models=[Job, Integration])
         logging.getLogger(__name__).info("Initialized Beanie with MongoDB for job persistence")
 
 # Initialize ETL Pipeline

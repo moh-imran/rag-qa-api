@@ -1,5 +1,4 @@
 from typing import List, Dict, Any, Optional
-from notion_client import Client
 from .base import BaseDataSource
 import logging
 
@@ -8,10 +7,19 @@ logger = logging.getLogger(__name__)
 
 class NotionSource(BaseDataSource):
     """Extract documents from Notion workspace"""
-    
+
     def __init__(self, api_key: str):
         super().__init__("NotionSource")
-        self.client = Client(auth=api_key)
+        if not api_key:
+            raise ValueError("Notion API key is required")
+        if not api_key.startswith(('secret_', 'ntn_')):
+            raise ValueError("Invalid Notion API key format. Key should start with 'secret_' or 'ntn_'")
+
+        try:
+            from notion_client import Client
+            self.client = Client(auth=api_key)
+        except ImportError:
+            raise ValueError("notion-client is not installed. Install it with: pip install notion-client")
     
     async def extract(
         self,
@@ -21,42 +29,99 @@ class NotionSource(BaseDataSource):
     ) -> List[Dict[str, Any]]:
         """
         Extract content from Notion
-        
+
         Args:
             database_id: Notion database ID to extract
             page_id: Specific page ID to extract
-        
+
         Returns:
             List of documents with content and metadata
         """
+        from notion_client import APIResponseError
+
         documents = []
-        
-        if database_id:
-            documents.extend(await self._extract_database(database_id))
-        elif page_id:
-            documents.extend(await self._extract_page(page_id))
-        else:
-            raise ValueError("Must provide either 'database_id' or 'page_id'")
-        
-        logger.info(f"Extracted {len(documents)} documents from Notion")
-        return documents
+
+        try:
+            # Test the API key by making a simple request
+            try:
+                self.client.users.me()
+            except APIResponseError as e:
+                if e.status == 401:
+                    raise ValueError("Notion API key is invalid or expired. Please check your integration token.")
+                raise
+
+            if database_id:
+                documents.extend(await self._extract_database(database_id))
+            elif page_id:
+                documents.extend(await self._extract_page(page_id))
+            else:
+                # If no database_id or page_id, try to list all accessible pages
+                logger.info("No database_id or page_id provided, searching for accessible content...")
+                try:
+                    search_results = self.client.search(filter={"property": "object", "value": "page"}, page_size=50)
+                    for page in search_results.get('results', []):
+                        page_docs = await self._extract_page(page['id'])
+                        documents.extend(page_docs)
+                    if not documents:
+                        raise ValueError("No accessible pages found. Make sure your integration has access to at least one page or database.")
+                except APIResponseError as e:
+                    raise ValueError(f"Notion search failed: {str(e)[:200]}")
+
+            logger.info(f"Extracted {len(documents)} documents from Notion")
+            return documents
+
+        except ValueError:
+            raise
+        except APIResponseError as e:
+            if e.status == 401:
+                raise ValueError("Notion API authentication failed. Check your API key.")
+            elif e.status == 403:
+                raise ValueError("Notion access denied. Make sure your integration has access to the requested content.")
+            elif e.status == 404:
+                raise ValueError("Notion content not found. Check the database_id or page_id.")
+            raise ValueError(f"Notion API error: {str(e)[:200]}")
+        except Exception as e:
+            logger.error(f"Error extracting from Notion: {e}")
+            raise ValueError(f"Notion extraction failed: {str(e)[:200]}")
     
     async def _extract_database(self, database_id: str) -> List[Dict[str, Any]]:
         """Extract all pages from a Notion database"""
+        from notion_client import APIResponseError
+
         documents = []
-        
+
         try:
-            # Query database
-            results = self.client.databases.query(database_id=database_id)
-            
-            for page in results.get('results', []):
-                page_docs = await self._extract_page(page['id'])
-                documents.extend(page_docs)
-        
+            # Query database with pagination
+            has_more = True
+            start_cursor = None
+
+            while has_more:
+                query_params = {"database_id": database_id}
+                if start_cursor:
+                    query_params["start_cursor"] = start_cursor
+
+                results = self.client.databases.query(**query_params)
+
+                for page in results.get('results', []):
+                    page_docs = await self._extract_page(page['id'])
+                    documents.extend(page_docs)
+
+                has_more = results.get('has_more', False)
+                start_cursor = results.get('next_cursor')
+
+            if not documents:
+                logger.warning(f"No pages found in Notion database {database_id}")
+
+        except APIResponseError as e:
+            if e.status == 404:
+                raise ValueError(f"Notion database '{database_id}' not found. Check if the ID is correct and your integration has access.")
+            elif e.status == 403:
+                raise ValueError(f"Access denied to Notion database '{database_id}'. Share the database with your integration.")
+            raise ValueError(f"Notion database query failed: {str(e)[:200]}")
         except Exception as e:
             logger.error(f"Error extracting Notion database {database_id}: {e}")
-            raise
-        
+            raise ValueError(f"Failed to extract Notion database: {str(e)[:200]}")
+
         return documents
     
     async def _extract_page(self, page_id: str) -> List[Dict[str, Any]]:

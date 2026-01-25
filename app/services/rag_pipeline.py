@@ -282,7 +282,13 @@ Answer:"""
         else:
             prompt = f"""You are a helpful AI assistant. Answer the user's question based on the provided context documents.
 
-If the answer is not in the context, say "I don't have enough information to answer this question."
+Instructions:
+- Carefully analyze all context documents to find relevant information
+- The documents may contain OCR-extracted text with formatting issues - look past these to find the actual content
+- In invoices/business documents: bank details (IBAN, BIC) listed in headers/footers typically belong to the company whose letterhead it is (the sender/service provider)
+- When you see a company name followed by address/contact info, the bank details in that same document section belong to that company
+- Extract and combine information from multiple documents if needed
+- Only say "I don't have enough information" if the answer truly cannot be found or inferred from the context
 
 Context Documents:
 {context}

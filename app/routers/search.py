@@ -28,17 +28,14 @@ async def search_documents(request: SearchRequest):
     """Search for similar documents using semantic search"""
     try:
         etl_pipeline._load_embedding_model()
-        query_embedding = etl_pipeline.embedding_model.encode(
-            request.query,
-            convert_to_numpy=True
-        ).tolist()
-        
+        query_embedding = etl_pipeline.embedding_provider.embed([request.query])[0].tolist()
+
         results = etl_pipeline.vector_store.search(
             query_vector=query_embedding,
             limit=request.limit,
             score_threshold=request.score_threshold
         )
-        
+
         return SearchResponse(
             query=request.query,
             results=results,
