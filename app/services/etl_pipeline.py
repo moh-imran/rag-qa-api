@@ -3,6 +3,8 @@ from sentence_transformers import util
 from fastembed import SparseTextEmbedding
 import numpy as np
 import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from .data_sources.base import BaseDataSource
 from .data_sources.file_source import FileSource
 from .data_sources.web_source import WebSource
@@ -13,6 +15,9 @@ from .embedding_providers import BaseEmbeddingProvider, create_embedding_provide
 from ..models.vector_store import QdrantVectorStore
 
 logger = logging.getLogger(__name__)
+
+# Thread pool for CPU-bound operations (embedding, chunking)
+_executor = ThreadPoolExecutor(max_workers=2)
 
 
 class ETLPipeline:
@@ -59,22 +64,41 @@ class ETLPipeline:
         **source_params
     ) -> Dict[str, Any]:
         """
-        Run complete ETL pipeline
+        Run complete ETL pipeline.
+        CPU-bound operations (chunking, embedding, storing) run in thread pool
+        to avoid blocking the event loop.
         """
         logger.info(f"Starting ETL pipeline with source: {source_type}, strategy: {chunking_strategy}")
-        
-        # EXTRACT
+        loop = asyncio.get_event_loop()
+
+        # EXTRACT (async)
         documents = await self.extract(source_type, **source_params)
-        
-        # TRANSFORM
-        chunks = self.chunk_documents(documents, chunk_size, chunk_overlap, chunking_strategy)
-        embedded_chunks = self.embed_chunks(chunks, batch_size)
-        
-        # LOAD (optional)
+
+        # TRANSFORM - run in thread pool to avoid blocking
+        logger.info(f"Chunking {len(documents)} documents...")
+        chunks = await loop.run_in_executor(
+            _executor,
+            self.chunk_documents,
+            documents, chunk_size, chunk_overlap, chunking_strategy
+        )
+
+        logger.info(f"Embedding {len(chunks)} chunks...")
+        embedded_chunks = await loop.run_in_executor(
+            _executor,
+            self.embed_chunks,
+            chunks, batch_size
+        )
+
+        # LOAD (optional) - run in thread pool
         storage_result = None
         if store_in_qdrant:
-            storage_result = self.store_vectors(embedded_chunks)
-        
+            logger.info(f"Storing {len(embedded_chunks)} vectors...")
+            storage_result = await loop.run_in_executor(
+                _executor,
+                self.store_vectors,
+                embedded_chunks
+            )
+
         result = {
             "status": "success",
             "total_documents": len(documents),
@@ -83,8 +107,8 @@ class ETLPipeline:
             "embedded_chunks": embedded_chunks if not store_in_qdrant else None,
             "storage": storage_result
         }
-        
-        logger.info(f"✅ ETL pipeline complete: {len(embedded_chunks)} processed chunks")
+
+        logger.info(f"ETL pipeline complete: {len(embedded_chunks)} processed chunks")
         return result
 
     def _load_embedding_model(self):
@@ -241,3 +265,51 @@ class ETLPipeline:
         """Get embedding dimension"""
         self._load_embedding_model()
         return self.embedding_provider.get_dimension()
+
+    async def extract(self, source_type: str, **source_params) -> List[Dict[str, Any]]:
+        """
+        EXTRACT phase: Get documents from the specified data source
+        """
+        if source_type not in self.data_sources:
+            raise ValueError(f"Unknown source type: {source_type}. Available: {list(self.data_sources.keys())}")
+
+        data_source = self.data_sources[source_type]
+        logger.info(f"📥 Extracting from source: {source_type}")
+
+        documents = await data_source.extract(**source_params)
+        logger.info(f"✅ Extracted {len(documents)} documents")
+        return documents
+
+    def chunk_documents(
+        self,
+        documents: List[Dict[str, Any]],
+        chunk_size: int = 1000,
+        chunk_overlap: int = 200,
+        chunking_strategy: str = "fixed"
+    ) -> List[Dict[str, Any]]:
+        """
+        TRANSFORM phase: Chunk documents into smaller pieces
+        """
+        logger.info(f"📄 Chunking {len(documents)} documents with strategy: {chunking_strategy}")
+
+        all_chunks = []
+        for doc in documents:
+            content = doc.get('content', '')
+            if not content:
+                continue
+
+            text_chunks = self._split_text(content, chunk_size, chunk_overlap)
+
+            for i, chunk_text in enumerate(text_chunks):
+                chunk = {
+                    'content': chunk_text,
+                    'metadata': {
+                        **doc.get('metadata', {}),
+                        'chunk_index': i,
+                        'source_doc': doc.get('metadata', {}).get('source', 'unknown')
+                    }
+                }
+                all_chunks.append(chunk)
+
+        logger.info(f"✅ Created {len(all_chunks)} chunks from {len(documents)} documents")
+        return all_chunks
