@@ -107,7 +107,8 @@ class QdrantVectorStore:
     def store_vectors(
         self,
         embedded_chunks: List[Dict[str, Any]],
-        batch_size: int = 100
+        batch_size: int = 100,
+        job_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Store embedded chunks in Qdrant with hybrid vectors
@@ -115,6 +116,7 @@ class QdrantVectorStore:
         Args:
             embedded_chunks: List of chunks with 'embedding' (dense) and 'sparse_embedding' (sparse)
             batch_size: Number of points to upload at once
+            job_id: Optional job ID to associate with the stored vectors
         """
         if not embedded_chunks:
             logger.warning("No chunks to store")
@@ -141,12 +143,17 @@ class QdrantVectorStore:
                         values=sparse_vector['values']
                     )
                 
+                # Prepare payload with original metadata and job_id
+                payload_metadata = chunk.get('metadata', {})
+                if job_id:
+                    payload_metadata['job_id'] = job_id
+
                 point = PointStruct(
                     id=str(uuid.uuid4()),  # Generate unique ID
                     vector=vector_dict,
                     payload={
                         'content': chunk['content'],
-                        'metadata': chunk['metadata']
+                        'metadata': payload_metadata
                     }
                 )
                 points.append(point)

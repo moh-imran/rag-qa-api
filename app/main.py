@@ -5,11 +5,9 @@ import os
 from app.services.etl_pipeline import ETLPipeline
 from app.services.rag_pipeline import RAGPipeline
 from app.routers import ingestion, search, collection, chat, evaluation
-from app.routers import integrations
 from beanie import init_beanie
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.models.job import Job
-from app.models.integration import Integration
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,7 +25,7 @@ async def startup_event():
     mongodb_url = os.getenv("MONGODB_URL", "mongodb://mongodb:27017/rag_chat")
     if mongodb_url:
         client = AsyncIOMotorClient(mongodb_url)
-        await init_beanie(database=client.get_default_database(), document_models=[Job, Integration])
+        await init_beanie(database=client.get_default_database(), document_models=[Job])
         logging.getLogger(__name__).info("Initialized Beanie with MongoDB for job persistence")
 
 # Initialize ETL Pipeline
@@ -69,7 +67,6 @@ app.include_router(search.router)
 app.include_router(collection.router)
 app.include_router(chat.router)
 app.include_router(evaluation.router)
-app.include_router(integrations.router)
 
 
 @app.get("/")

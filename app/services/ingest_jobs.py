@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 import logging
+import functools
 from typing import Dict, Any, Optional
 from datetime import datetime
 
@@ -30,10 +31,13 @@ class IngestJobManager:
         )
         await job_doc.insert()
 
+        # Wrap the coroutine to pass job_id
+        partial_coro = functools.partial(coro, job_id=job_id)
+
         async def _runner():
             try:
                 logger.info(f"Starting job {job_id}")
-                res = await coro()
+                res = await partial_coro()
                 # Update job doc
                 if not job_doc.logs:
                     job_doc.logs = []
@@ -57,6 +61,18 @@ class IngestJobManager:
         asyncio.create_task(_runner())
         return job_id
 
+    async def delete_job_record(self, job_id: str) -> Dict[str, Any]:
+        """Delete a job record from MongoDB. Vector deletion is handled by the caller."""
+        job = await Job.find_one(Job.job_id == job_id)
+        if not job:
+            return {"status": "not_found"}
+
+        # Delete job from MongoDB
+        await job.delete()
+
+        return {"status": "success", "message": f"Job record {job_id} deleted."}
+
+
     async def get_status(self, job_id: str) -> Optional[Dict[str, Any]]:
         job = await Job.find_one(Job.job_id == job_id)
         if not job:
@@ -72,8 +88,21 @@ class IngestJobManager:
             'finished_at': job.finished_at
         }
 
-    async def list_jobs(self, limit: int = 50):
-        docs = await Job.find_all().sort(-Job.created_at).limit(limit).to_list()
+    async def list_jobs(self, limit: int = 50, skip: int = 0, search: Optional[str] = None):
+        query = Job.find_all()
+        if search:
+            # Simple regex search on filename in meta or job_id
+            # Note: MongoDB regex queries can be slow on large datasets without indexes
+            query = Job.find({
+                "$or": [
+                    {"job_id": {"$regex": search, "$options": "i"}},
+                    {"meta.filename": {"$regex": search, "$options": "i"}},
+                    {"meta.url": {"$regex": search, "$options": "i"}},
+                    {"status": {"$regex": search, "$options": "i"}}
+                ]
+            })
+        
+        docs = await query.sort(-Job.created_at).skip(skip).limit(limit).to_list()
         return [
             {
                 'job_id': d.job_id,

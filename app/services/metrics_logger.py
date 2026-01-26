@@ -207,6 +207,29 @@ class MetricsLogger:
         
         return summary
     
+    def get_all_feedback(self) -> List[Dict[str, Any]]:
+        """
+        Get all raw feedback entries
+        
+        Returns:
+            List of feedback entries
+        """
+        if not self.feedback_log.exists():
+            return []
+        
+        feedback_data = []
+        
+        with open(self.feedback_log, 'r') as f:
+            for line in f:
+                try:
+                    feedback_data.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        
+        # Sort by timestamp descending
+        feedback_data.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        return feedback_data
+
     def export_to_csv(self, output_file: str, log_type: str = "queries"):
         """
         Export logs to CSV

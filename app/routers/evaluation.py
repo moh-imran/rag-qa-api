@@ -163,6 +163,18 @@ async def submit_feedback(request: FeedbackRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/feedback")
+async def list_feedback():
+    """
+    Get list of all user feedback
+    """
+    try:
+        return metrics_logger.get_all_feedback()
+    except Exception as e:
+        logger.error(f"Error listing feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/export/{log_type}")
 async def export_logs(log_type: str):
     """

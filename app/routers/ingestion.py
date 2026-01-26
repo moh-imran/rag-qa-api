@@ -88,18 +88,7 @@ async def ingest_run(request: IngestRunRequest):
             'store_in_qdrant': request.store_in_qdrant
         })
 
-        # If integration_id provided, resolve it to actual credentials and merge
-        integration_id = params.pop('integration_id', None)
-        if integration_id:
-            try:
-                from .integrations import get_decrypted_config
-                cfg = await get_decrypted_config(integration_id)
-                if cfg:
-                    for k, v in cfg.items():
-                        if k not in params or not params.get(k):
-                            params[k] = v
-            except Exception:
-                pass
+
 
         # If the request requires dynamic data source registration (Notion, Database), register it
         if request.source_type == 'notion':
@@ -167,18 +156,7 @@ async def ingest_submit(request: IngestSubmitRequest):
     try:
         params = dict(request.source_params or {})
 
-        # If integration_id provided, resolve it to actual credentials and merge
-        integration_id = params.pop('integration_id', None)
-        if integration_id:
-            try:
-                from .integrations import get_decrypted_config
-                cfg = await get_decrypted_config(integration_id)
-                if cfg:
-                    for k, v in cfg.items():
-                        if k not in params or not params.get(k):
-                            params[k] = v
-            except Exception:
-                pass
+
 
         # dynamic registration for credentials
         if request.source_type == 'notion':
@@ -225,13 +203,14 @@ async def ingest_submit(request: IngestSubmitRequest):
             etl_pipeline.add_data_source('sharepoint', SharePointSource(access_token=access_token, site_id=site_id))
 
         # wrapper coroutine to run ETL
-        async def _run_job():
+        async def _run_job(job_id: str):
             return await etl_pipeline.run(
                 source_type=request.source_type,
                 chunk_size=request.chunk_size,
                 chunk_overlap=request.chunk_overlap,
                 batch_size=request.batch_size,
                 store_in_qdrant=request.store_in_qdrant,
+                job_id=job_id,
                 **params
             )
 
@@ -252,8 +231,8 @@ async def ingest_status(job_id: str):
 
 
 @router.get('/jobs')
-async def ingest_jobs_list(limit: int = 50):
-    jobs = await job_manager.list_jobs(limit=limit)
+async def ingest_jobs_list(limit: int = 50, skip: int = 0, search: Optional[str] = None):
+    jobs = await job_manager.list_jobs(limit=limit, skip=skip, search=search)
     return {"jobs": jobs}
 
 
@@ -264,6 +243,29 @@ async def ingest_job_logs(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     # status contains 'result' and we added 'logs' via Job document
     return {"job_id": job_id, "logs": status.get('result') and status.get('result').get('logs') or status.get('logs') or []}
+
+@router.delete('/jobs/{job_id}')
+async def delete_ingest_job(job_id: str):
+    """Delete an ingestion job and its associated data."""
+    try:
+        # 1. Delete vectors from Qdrant
+        try:
+            etl_pipeline.vector_store.delete_by_filter(filter_dict={'job_id': job_id})
+        except Exception as e:
+            # We log error but proceed to delete the job record so we don't end up with orphan records
+            # that can't be deleted.
+            print(f"Warning: Failed to delete vectors for job {job_id}: {e}")
+
+        # 2. Delete job record from MongoDB
+        result = await job_manager.delete_job_record(job_id)
+        
+        if result.get("status") == "not_found":
+             raise HTTPException(status_code=404, detail="Job not found")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/upload")
@@ -289,7 +291,7 @@ async def ingest_upload(
         filename = file.filename
 
         # Create async job for processing
-        async def _run_upload_job():
+        async def _run_upload_job(job_id: str): # Modified to accept job_id
             try:
                 result = await etl_pipeline.run(
                     source_type='file',
@@ -297,7 +299,8 @@ async def ingest_upload(
                     chunk_size=chunk_size,
                     chunk_overlap=chunk_overlap,
                     batch_size=batch_size,
-                    store_in_qdrant=store_in_qdrant
+                    store_in_qdrant=store_in_qdrant,
+                    job_id=job_id # Passing job_id
                 )
                 return {
                     "status": "success",

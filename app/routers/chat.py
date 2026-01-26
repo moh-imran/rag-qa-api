@@ -103,7 +103,7 @@ async def query_documents_stream(request: QueryRequest):
         async def event_generator():
             # Generate a unique query_id for this request
             query_id = str(uuid.uuid4())
-            yield f"data: {json.dumps({'type': 'conversation_id', 'conversation_id': query_id})}\n\n"
+            yield f"data: {json.dumps({'type': 'query_id', 'query_id': query_id})}\n\n"
 
             for event in rag_pipeline.query_stream(
                 question=request.question,
@@ -170,7 +170,7 @@ async def chat_stream(request: ChatRequest):
         async def event_generator():
             # Generate a unique query_id for this request
             query_id = str(uuid.uuid4())
-            yield f"data: {json.dumps({'type': 'conversation_id', 'conversation_id': query_id})}\n\n"
+            yield f"data: {json.dumps({'type': 'query_id', 'query_id': query_id})}\n\n"
 
             # Convert to dict format
             messages = [msg.dict() for msg in request.messages]
