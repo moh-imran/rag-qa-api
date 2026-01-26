@@ -1,6 +1,10 @@
 from fastapi import FastAPI
 import logging
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 from app.services.etl_pipeline import ETLPipeline
 from app.services.rag_pipeline import RAGPipeline

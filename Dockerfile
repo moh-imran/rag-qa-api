@@ -3,6 +3,10 @@ FROM python:3.11-slim
 
 WORKDIR /workspace
 
+# Add OpenAI API Key support
+ARG OPENAI_API_KEY
+ENV OPENAI_API_KEY=$OPENAI_API_KEY
+
 # Install system dependencies (cached layer)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
