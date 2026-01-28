@@ -1,4 +1,4 @@
-name: Deploy RAG Images
+name: Deploy RAG Stack
 
 on:
   push:
@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: SSH & Pull Latest Images
+      - name: SSH & Deploy
         uses: appleboy/ssh-action@v0.1.6
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -22,3 +22,4 @@ jobs:
             docker compose pull
             docker compose up -d
 
+            docker logout ghcr.io
