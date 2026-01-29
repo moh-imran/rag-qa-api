@@ -242,39 +242,7 @@ class ETLPipeline:
         # Ensure collection exists
         self._ensure_collection_exists()
         
-        # Prepare points for Qdrant
-        points = []
-        for chunk in embedded_chunks:
-            dense_vector = chunk.get('embedding')
-            sparse_vector = chunk.get('sparse_embedding')
-            
-            vector_dict = {}
-            if dense_vector:
-                vector_dict["text-dense"] = dense_vector
-            
-            if sparse_vector:
-                from qdrant_client.models import SparseVector
-                vector_dict["text-sparse"] = SparseVector(
-                    indices=sparse_vector['indices'],
-                    values=sparse_vector['values']
-                )
-            
-            # Prepare payload with original metadata and job_id
-            payload_metadata = chunk['metadata']
-            if job_id:
-                payload_metadata['job_id'] = job_id
-
-            point = PointStruct(
-                id=str(uuid.uuid4()),  # Generate unique ID
-                vector=vector_dict,
-                payload={
-                    'content': chunk['content'],
-                    'metadata': payload_metadata
-                }
-            )
-            points.append(point)
-        
-        # Store vectors
+        # Store vectors using the dedicated service
         result = self.vector_store.store_vectors(embedded_chunks, batch_size, job_id=job_id)
         
         logger.info(f"✅ Stored {result['stored']} vectors")

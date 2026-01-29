@@ -12,6 +12,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -23,14 +26,17 @@ jobs:
           password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Build & Push Image
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            -t ghcr.io/${{ github.repository_owner }}/rag-qa-api:latest \
-            --build-arg OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} \
-            --build-arg CROSS_ENCODER_MODEL=${{ vars.CROSS_ENCODER_MODEL || 'cross-encoder/ms-marco-MiniLM-L-6-v2' }} \
-            --build-arg EMBEDDING_PROVIDER=${{ vars.EMBEDDING_PROVIDER || 'huggingface' }} \
-            --build-arg EMBEDDING_MODEL=${{ vars.EMBEDDING_MODEL || 'all-MiniLM-L6-v2' }} \
-            --build-arg MONGODB_URL=${{ vars.MONGODB_URL || 'mongodb://mongodb:27017/rag_chat' }} \
-            . \
-            --push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/rag-qa-api:latest
+          build-args: |
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            CROSS_ENCODER_MODEL=${{ vars.CROSS_ENCODER_MODEL || 'cross-encoder/ms-marco-MiniLM-L-6-v2' }}
+            EMBEDDING_PROVIDER=${{ vars.EMBEDDING_PROVIDER || 'huggingface' }}
+            EMBEDDING_MODEL=${{ vars.EMBEDDING_MODEL || 'all-MiniLM-L6-v2' }}
+            MONGODB_URL=${{ vars.MONGODB_URL || 'mongodb://mongodb:27017/rag_chat' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
