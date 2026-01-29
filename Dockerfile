@@ -3,9 +3,22 @@ FROM python:3.11-slim
 
 WORKDIR /workspace
 
-# Add OpenAI API Key support
-ARG OPENAI_API_KEY
+# Environment variables configuration
+ARG PYTHONUNBUFFERED=1
+ARG PYTHONPATH=/workspace
+ARG OPENAI_API_KEY=sk-xxxx
+ARG CROSS_ENCODER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+ARG EMBEDDING_PROVIDER=huggingface
+ARG EMBEDDING_MODEL=all-MiniLM-L6-v2
+ARG MONGODB_URL=mongodb://mongodb:27017/rag_chat
+
+ENV PYTHONUNBUFFERED=$PYTHONUNBUFFERED
+ENV PYTHONPATH=$PYTHONPATH
 ENV OPENAI_API_KEY=$OPENAI_API_KEY
+ENV CROSS_ENCODER_MODEL=$CROSS_ENCODER_MODEL
+ENV EMBEDDING_PROVIDER=$EMBEDDING_PROVIDER
+ENV EMBEDDING_MODEL=$EMBEDDING_MODEL
+ENV MONGODB_URL=$MONGODB_URL
 
 # Install system dependencies (cached layer)
 RUN apt-get update && apt-get install -y --no-install-recommends \
