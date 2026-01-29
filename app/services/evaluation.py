@@ -186,7 +186,7 @@ class QAEvaluator:
         """
         return 1.0 if expected.strip().lower() in predicted.strip().lower() else 0.0
     
-    def llm_as_judge(
+    async def llm_as_judge(
         self,
         question: str,
         predicted: str,
@@ -227,7 +227,7 @@ Respond in JSON format:
 {{"score": <0-10>, "reasoning": "<brief explanation>"}}"""
         
         try:
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are an expert answer evaluator. Respond only with valid JSON."},
@@ -249,7 +249,7 @@ Respond in JSON format:
             logger.error(f"Error in LLM-as-judge: {e}")
             return {"score": 0.0, "reasoning": f"Error: {str(e)}"}
     
-    def evaluate_answer(
+    async def evaluate_answer(
         self,
         question: str,
         predicted: str,
@@ -274,7 +274,7 @@ Respond in JSON format:
         }
         
         if use_llm_judge and self.client:
-            llm_result = self.llm_as_judge(question, predicted, expected)
+            llm_result = await self.llm_as_judge(question, predicted, expected)
             metrics['llm_score'] = llm_result['score']
             metrics['llm_reasoning'] = llm_result.get('reasoning', '')
         

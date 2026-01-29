@@ -105,18 +105,22 @@ async def query_documents_stream(request: QueryRequest):
             query_id = str(uuid.uuid4())
             yield f"data: {json.dumps({'type': 'query_id', 'query_id': query_id})}\n\n"
 
-            for event in rag_pipeline.query_stream(
-                question=request.question,
-                top_k=request.top_k,
-                score_threshold=request.score_threshold,
-                system_instruction=request.system_instruction,
-                max_tokens=request.max_tokens,
-                temperature=request.temperature,
-                metadata_filters=request.metadata_filters,
-                use_hyde=request.use_hyde
-            ):
-                # Format as Server-Sent Event
-                yield f"data: {json.dumps(event)}\n\n"
+            try:
+                async for event in rag_pipeline.query_stream(
+                    question=request.question,
+                    top_k=request.top_k,
+                    score_threshold=request.score_threshold,
+                    system_instruction=request.system_instruction,
+                    max_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                    metadata_filters=request.metadata_filters,
+                    use_hyde=request.use_hyde
+                ):
+                    # Format as Server-Sent Event
+                    yield f"data: {json.dumps(event)}\n\n"
+            except Exception as e:
+                logger.error(f"Error in event_generator: {e}")
+                yield f"data: {json.dumps({'type': 'error', 'data': {'message': str(e)}})}\n\n"
 
         return StreamingResponse(
             event_generator(),
@@ -178,15 +182,19 @@ async def chat_stream(request: ChatRequest):
             # Get last message as question for streaming
             last_message = messages[-1]['content']
 
-            for event in rag_pipeline.query_stream(
-                question=last_message,
-                top_k=request.top_k,
-                max_tokens=request.max_tokens,
-                temperature=request.temperature,
-                metadata_filters=request.metadata_filters,
-                use_hyde=request.use_hyde
-            ):
-                yield f"data: {json.dumps(event)}\n\n"
+            try:
+                async for event in rag_pipeline.query_stream(
+                    question=last_message,
+                    top_k=request.top_k,
+                    max_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                    metadata_filters=request.metadata_filters,
+                    use_hyde=request.use_hyde
+                ):
+                    yield f"data: {json.dumps(event)}\n\n"
+            except Exception as e:
+                logger.error(f"Error in chat_stream event_generator: {e}")
+                yield f"data: {json.dumps({'type': 'error', 'data': {'message': str(e)}})}\n\n"
 
         return StreamingResponse(
             event_generator(),
