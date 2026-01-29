@@ -2,7 +2,7 @@ from typing import List, Dict, Any, Optional
 import logging
 from sentence_transformers import CrossEncoder
 from fastembed import SparseTextEmbedding
-from openai import OpenAI
+from openai import AsyncOpenAI
 import time
 import random
 from app.models.vector_store import QdrantVectorStore
@@ -55,8 +55,8 @@ class RAGPipeline:
         
         # Configure OpenAI
         if openai_api_key:
-            self.client = OpenAI(api_key=openai_api_key)
-            logger.info(f"Initialized OpenAI client with model: {openai_model}")
+            self.client = AsyncOpenAI(api_key=openai_api_key)
+            logger.info(f"Initialized AsyncOpenAI client with model: {openai_model}")
         else:
             logger.warning("No OpenAI API key provided")
             self.client = None
@@ -151,7 +151,7 @@ Question: {query}
 Answer:"""
         
         try:
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=self.openai_model_name,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that generates hypothetical document passages."},
@@ -325,7 +325,7 @@ Answer:"""
         for attempt in range(max_retries + 1):
             try:
                 # Generate response using OpenAI Chat Completion
-                response = self.client.chat.completions.create(
+                response = await self.client.chat.completions.create(
                     model=self.openai_model_name,
                     messages=[
                         {"role": "system", "content": "You are a helpful AI assistant that answers questions based on provided context."},
@@ -352,7 +352,7 @@ Answer:"""
                 logger.error(f"Error generating answer: {e}")
                 raise
     
-    def generate_answer_stream(
+    async def generate_answer_stream(
         self,
         prompt: str,
         max_tokens: int = 1000,
@@ -374,7 +374,7 @@ Answer:"""
         
         try:
             # Generate response using OpenAI Chat Completion with streaming
-            stream = self.client.chat.completions.create(
+            stream = await self.client.chat.completions.create(
                 model=self.openai_model_name,
                 messages=[
                     {"role": "system", "content": "You are a helpful AI assistant that answers questions based on provided context."},
@@ -385,7 +385,7 @@ Answer:"""
                 stream=True
             )
             
-            for chunk in stream:
+            async for chunk in stream:
                 if chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
                     
@@ -585,7 +585,7 @@ Answer:"""
         
         return response
     
-    def query_stream(
+    async def query_stream(
         self,
         question: str,
         top_k: int = 5,
@@ -652,7 +652,7 @@ Answer:"""
         yield {"type": "generation_start", "data": {}}
         
         # Step 4: Generate answer with streaming
-        for token in self.generate_answer_stream(prompt, max_tokens, temperature):
+        async for token in self.generate_answer_stream(prompt, max_tokens, temperature):
             yield {"type": "token", "data": {"content": token}}
         
         # Yield done event
@@ -677,7 +677,7 @@ Follow-up Question: {latest_question}
 Standalone Question:"""
 
         try:
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=self.openai_model_name,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that rephrases questions for optimized search."},
@@ -740,7 +740,7 @@ Standalone Question:"""
         
         # 4. Generate answer
         try:
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=self.openai_model_name,
                 messages=llm_messages,
                 max_tokens=kwargs.get("max_tokens", 1000),

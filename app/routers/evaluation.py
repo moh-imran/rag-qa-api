@@ -76,7 +76,7 @@ async def run_benchmark(request: BenchmarkRequest):
             all_retrieval_metrics.append(retrieval_metrics)
             
             # Evaluate answer
-            qa_metrics = qa_evaluator.evaluate_answer(
+            qa_metrics = await qa_evaluator.evaluate_answer(
                 question=item.question,
                 predicted=result['answer'],
                 expected=item.expected_answer,
