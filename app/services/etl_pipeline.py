@@ -98,6 +98,7 @@ class ETLPipeline:
                 _executor,
                 self.store_vectors,
                 embedded_chunks,
+                batch_size,
                 job_id
             )
 
