@@ -142,7 +142,7 @@ async def ingest_run(request: IngestRunRequest):
 
 
 class IngestSubmitRequest(BaseModel):
-    name: str = Field(..., description="User-friendly job name")
+    name: Optional[str] = Field(None, description="User-friendly job name")
     source_type: str
     source_params: Dict[str, Any] = Field(default_factory=dict)
     chunk_size: int = Field(1000)
