@@ -65,7 +65,14 @@ class FileSource(BaseDataSource):
                 logger.warning("OCR not available: pytesseract or tesseract not installed")
         return self._ocr_available
 
-    async def extract(
+    async def extract(self, **kwargs) -> List[Dict[str, Any]]:
+        """Standard batch extraction (returns list)"""
+        docs = []
+        async for doc in self.extract_stream(**kwargs):
+            docs.append(doc)
+        return docs
+
+    async def extract_stream(
         self,
         path: str = None,
         file_path: str = None,
@@ -76,19 +83,9 @@ class FileSource(BaseDataSource):
         extract_tables: bool = True,
         extract_images: bool = False,
         **kwargs
-    ) -> List[Dict[str, Any]]:
+    ):
         """
-        Extract documents from files or directory
-
-        Args:
-            path: Single file or directory path (auto-detect)
-            file_path: Explicit single file path
-            directory_path: Explicit directory path
-            ocr_enabled: Enable OCR for scanned PDFs and images
-            ocr_language: Tesseract language code (e.g., 'eng', 'fra', 'deu')
-            password: Password for encrypted PDFs
-            extract_tables: Extract tables from documents
-            extract_images: Extract text from embedded images via OCR
+        Extract documents from files or directory as a stream
         """
         # Store extraction options
         self._ocr_enabled = ocr_enabled
@@ -106,11 +103,51 @@ class FileSource(BaseDataSource):
                 directory_path = path
 
         if file_path:
-            return await self._extract_single_file(file_path)
+            async for doc in self._extract_single_file_stream(file_path):
+                yield doc
         elif directory_path:
-            return await self._extract_directory(directory_path)
+            async for doc in self._extract_directory_stream(directory_path):
+                yield doc
         else:
             raise ValueError("Must provide either 'path', 'file_path', or 'directory_path'")
+
+    async def _extract_directory_stream(self, dir_path: str):
+        """Scan directory and yield files one by one"""
+        path = Path(dir_path)
+        if not path.exists() or not path.is_dir():
+            raise ValueError(f"Directory not found: {dir_path}")
+
+        for file_path in path.rglob('*'):
+            if file_path.suffix.lower() in self.supported_formats:
+                try:
+                    async for doc in self._extract_single_file_stream(str(file_path)):
+                        yield doc
+                except Exception as e:
+                    logger.error(f"Error extracting {file_path}: {e}")
+                    continue
+
+    async def _extract_single_file_stream(self, file_path: str):
+        """Stream content from a single file based on its extension"""
+        path = Path(file_path).resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        suffix = path.suffix.lower()
+        if suffix not in self.supported_formats:
+            return
+
+        # Large files (PDF, CSV) are yielded page-by-page or batch-by-batch
+        if suffix == '.pdf':
+            async for doc in self._extract_pdf_stream(path):
+                yield doc
+        elif suffix == '.csv':
+            async for doc in self._extract_csv_stream(path):
+                yield doc
+        else:
+            # For other formats, fallback to standard extraction (yield single doc)
+            docs = await self._extract_single_file(file_path)
+            for doc in docs:
+                yield doc
 
     async def _extract_directory(self, dir_path: str) -> List[Dict[str, Any]]:
         """Scan directory and extract all supported files"""
@@ -182,10 +219,91 @@ class FileSource(BaseDataSource):
                 'filename': path.name,
                 'filepath': str(path.absolute()),
                 'type': suffix[1:],
-                'size_bytes': path.stat().st_size,
                 'extraction_method': extraction_method
             }
         }]
+
+    async def _extract_pdf_stream(self, path: Path):
+        """Yield PDF content page-by-page"""
+        try:
+            import fitz
+            doc = fitz.open(str(path))
+            
+            # Check for encryption
+            if doc.is_encrypted:
+                if self._password:
+                    if not doc.authenticate(self._password):
+                        raise ValueError("PDF password incorrect")
+                else:
+                    if not doc.authenticate(""):
+                        raise ValueError("PDF is password protected")
+
+            for page_num, page in enumerate(doc):
+                page_text = page.get_text().strip()
+                
+                # Dynamic OCR fallback for large pages
+                if len(page_text) < 50 and self._ocr_enabled and self._check_ocr_available():
+                    page_text = self._ocr_pdf_page(page) or ""
+
+                if page_text:
+                    yield {
+                        'content': page_text,
+                        'metadata': {
+                            'source': self.source_name,
+                            'filename': path.name,
+                            'page': page_num + 1,
+                            'total_pages': len(doc),
+                            'type': 'pdf'
+                        }
+                    }
+            doc.close()
+        except ImportError:
+            # Fallback to batch if fitz missing (though ideally fitz should be there)
+            content, method = self._extract_pdf(path)
+            yield {
+                'content': content,
+                'metadata': {'source': self.source_name, 'filename': path.name, 'type': 'pdf', 'method': method}
+            }
+
+    async def _extract_csv_stream(self, path: Path, batch_size: int = 100):
+        """Yield CSV content in batches of rows"""
+        import csv
+        for encoding in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']:
+            try:
+                with open(path, 'r', encoding=encoding, newline='') as f:
+                    reader = csv.reader(f)
+                    header = next(reader, None)
+                    
+                    rows = []
+                    batch_idx = 0
+                    for row_num, row in enumerate(reader, 1):
+                        rows.append(row)
+                        if len(rows) >= batch_size:
+                            yield {
+                                'content': self._format_table([header] + rows if header else rows),
+                                'metadata': {
+                                    'source': self.source_name,
+                                    'filename': path.name,
+                                    'batch': batch_idx,
+                                    'type': 'csv'
+                                }
+                            }
+                            rows = []
+                            batch_idx += 1
+                    
+                    if rows:
+                        yield {
+                            'content': self._format_table([header] + rows if header else rows),
+                            'metadata': {
+                                'source': self.source_name,
+                                'filename': path.name,
+                                'batch': batch_idx,
+                                'type': 'csv'
+                            }
+                        }
+                return
+            except (UnicodeDecodeError, StopIteration):
+                continue
 
     def _extract_pdf(self, path: Path) -> tuple[str, str]:
         """

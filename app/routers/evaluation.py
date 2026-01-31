@@ -57,7 +57,7 @@ async def run_benchmark(request: BenchmarkRequest):
         
         for item in request.items:
             # Run query
-            result = rag_pipeline.query(
+            result = await rag_pipeline.query(
                 question=item.question,
                 return_sources=True
             )

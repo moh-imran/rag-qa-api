@@ -16,18 +16,20 @@ class IngestJobManager:
     def __init__(self):
         self._lock = asyncio.Lock()
 
-    async def submit(self, coro, *, job_meta: Optional[Dict[str, Any]] = None) -> str:
+    async def submit(self, coro, *, job_name: str = "Unnamed Job", created_by: Optional[str] = None, job_meta: Optional[Dict[str, Any]] = None) -> str:
         """Submit a coroutine that performs the ingestion work and persist job metadata to MongoDB."""
         job_id = str(uuid.uuid4())
 
         # Create job document
         job_doc = Job(
             job_id=job_id,
+            name=job_name,
             status='running',
             progress=0.0,
             result=None,
             error=None,
             meta=job_meta or {},
+            created_by=created_by,
         )
         await job_doc.insert()
 
@@ -79,11 +81,13 @@ class IngestJobManager:
             return None
         return {
             'job_id': job.job_id,
+            'name': job.name,
             'status': job.status,
             'progress': job.progress,
             'result': job.result,
             'error': job.error,
             'meta': job.meta,
+            'created_by': job.created_by,
             'created_at': job.created_at,
             'finished_at': job.finished_at
         }
@@ -91,14 +95,16 @@ class IngestJobManager:
     async def list_jobs(self, limit: int = 50, skip: int = 0, search: Optional[str] = None):
         query = Job.find_all()
         if search:
-            # Simple regex search on filename in meta or job_id
+            # Simple regex search on name, filename in meta, or job_id
             # Note: MongoDB regex queries can be slow on large datasets without indexes
             query = Job.find({
                 "$or": [
                     {"job_id": {"$regex": search, "$options": "i"}},
+                    {"name": {"$regex": search, "$options": "i"}},
                     {"meta.filename": {"$regex": search, "$options": "i"}},
                     {"meta.url": {"$regex": search, "$options": "i"}},
-                    {"status": {"$regex": search, "$options": "i"}}
+                    {"status": {"$regex": search, "$options": "i"}},
+                    {"created_by": {"$regex": search, "$options": "i"}}
                 ]
             })
         
@@ -106,9 +112,11 @@ class IngestJobManager:
         return [
             {
                 'job_id': d.job_id,
+                'name': d.name,
                 'status': d.status,
                 'progress': d.progress,
                 'meta': d.meta,
+                'created_by': d.created_by,
                 'created_at': d.created_at,
                 'finished_at': d.finished_at,
             }

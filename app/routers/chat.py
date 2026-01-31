@@ -67,7 +67,7 @@ async def query_documents(request: QueryRequest):
     ```
     """
     try:
-        result = rag_pipeline.query(
+        result = await rag_pipeline.query(
             question=request.question,
             top_k=request.top_k,
             score_threshold=request.score_threshold,
@@ -146,7 +146,7 @@ async def chat(request: ChatRequest):
         # Convert to dict format
         messages = [msg.dict() for msg in request.messages]
         
-        result = rag_pipeline.chat(
+        result = await rag_pipeline.chat(
             messages=messages,
             top_k=request.top_k,
             max_tokens=request.max_tokens,
@@ -217,7 +217,7 @@ async def list_models():
         if rag_pipeline.client is None:
             raise HTTPException(status_code=503, detail="OpenAI API not configured")
         
-        models = rag_pipeline.client.models.list()
+        models = await rag_pipeline.client.models.list()
         
         return {
             "available_models": [

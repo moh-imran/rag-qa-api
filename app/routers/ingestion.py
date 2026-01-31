@@ -142,6 +142,7 @@ async def ingest_run(request: IngestRunRequest):
 
 
 class IngestSubmitRequest(BaseModel):
+    name: str = Field(..., description="User-friendly job name")
     source_type: str
     source_params: Dict[str, Any] = Field(default_factory=dict)
     chunk_size: int = Field(1000)
@@ -214,7 +215,12 @@ async def ingest_submit(request: IngestSubmitRequest):
                 **params
             )
 
-        job_id = await job_manager.submit(_run_job, job_meta={"source_type": request.source_type, "params": request.source_params})
+        job_id = await job_manager.submit(
+            _run_job,
+            job_name=request.name,
+            created_by=None,  # TODO: Extract from auth context when available
+            job_meta={"source_type": request.source_type, "params": request.source_params}
+        )
         return {"job_id": job_id}
     except HTTPException:
         raise
@@ -271,6 +277,7 @@ async def delete_ingest_job(job_id: str):
 @router.post("/upload")
 async def ingest_upload(
     file: UploadFile = File(...),
+    name: Optional[str] = None,
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
     batch_size: int = 32,
@@ -289,6 +296,12 @@ async def ingest_upload(
             tmp_path = tmp_file.name
 
         filename = file.filename
+        
+        # Generate job name if not provided
+        if not name:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            name = f"Upload: {filename} - {timestamp}"
 
         # Create async job for processing
         async def _run_upload_job(job_id: str): # Modified to accept job_id
@@ -318,6 +331,8 @@ async def ingest_upload(
 
         job_id = await job_manager.submit(
             _run_upload_job,
+            job_name=name,
+            created_by=None,  # TODO: Extract from auth context when available
             job_meta={"source_type": "file", "filename": filename}
         )
 

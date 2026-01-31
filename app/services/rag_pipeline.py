@@ -130,7 +130,7 @@ class RAGPipeline:
         
         return embedding.tolist()
     
-    def _generate_hypothetical_document(self, query: str) -> str:
+    async def _generate_hypothetical_document(self, query: str) -> str:
         """
         Generate a hypothetical answer using HyDE (Hypothetical Document Embeddings)
         
@@ -169,7 +169,7 @@ Answer:"""
             logger.error(f"Error generating HyDE: {e}")
             return query
     
-    def retrieve_context(
+    async def retrieve_context(
         self,
         query: str,
         query_embedding: List[float],
@@ -194,7 +194,7 @@ Answer:"""
         """
         # 0. HyDE: Generate hypothetical document if enabled
         if use_hyde:
-            hypothetical_doc = self._generate_hypothetical_document(query)
+            hypothetical_doc = await self._generate_hypothetical_document(query)
             # Re-embed using hypothetical document
             query_embedding = self.embed_query(hypothetical_doc)
             logger.info("Using HyDE embedding for retrieval")
@@ -299,7 +299,7 @@ Answer:"""
         
         return prompt
     
-    def generate_answer(
+    async def generate_answer(
         self,
         prompt: str,
         max_tokens: int = 1000,
@@ -393,7 +393,7 @@ Answer:"""
             logger.error(f"Error generating streaming answer: {e}")
             raise
     
-    def query(
+    async def query(
         self,
         question: str,
         top_k: int = 5,
@@ -430,7 +430,7 @@ Answer:"""
         
         # Federated search if collection router is available
         if self.collection_router and routing_strategy:
-            return self._federated_query(
+            return await self._federated_query(
                 question=question,
                 top_k=top_k,
                 score_threshold=score_threshold,
@@ -448,7 +448,7 @@ Answer:"""
         query_embedding = self.embed_query(question)
         
         # Step 2: Retrieve relevant documents
-        context_docs = self.retrieve_context(
+        context_docs = await self.retrieve_context(
             question,
             query_embedding,
             top_k=top_k,
@@ -468,7 +468,7 @@ Answer:"""
         prompt = self.build_prompt(question, context_docs, system_instruction)
         
         # Step 4: Generate answer
-        answer = self.generate_answer(prompt, max_tokens, temperature)
+        answer = await self.generate_answer(prompt, max_tokens, temperature)
         
         # Prepare response
         response = {
@@ -507,7 +507,7 @@ Answer:"""
         
         return response
     
-    def _federated_query(
+    async def _federated_query(
         self,
         question: str,
         top_k: int,
@@ -539,7 +539,7 @@ Answer:"""
             for collection_name in target_collections:
                 self.vector_store.switch_collection(collection_name)
                 query_embedding = self.embed_query(question)
-                context_docs = self.retrieve_context(
+                context_docs = await self.retrieve_context(
                     question, query_embedding, top_k=top_k,
                     score_threshold=score_threshold,
                     metadata_filters=metadata_filters,
@@ -560,7 +560,7 @@ Answer:"""
             }
         
         prompt = self.build_prompt(question, merged_docs, system_instruction)
-        answer = self.generate_answer(prompt, max_tokens, temperature)
+        answer = await self.generate_answer(prompt, max_tokens, temperature)
         
         response = {
             "answer": answer,
@@ -613,7 +613,7 @@ Answer:"""
         query_embedding = self.embed_query(question)
         
         # Step 2: Retrieve relevant documents
-        context_docs = self.retrieve_context(
+        context_docs = await self.retrieve_context(
             question,
             query_embedding,
             top_k=top_k,
@@ -658,7 +658,7 @@ Answer:"""
         # Yield done event
         yield {"type": "done", "data": {}}
     
-    def _rephrase_question(self, messages: List[Dict[str, str]]) -> str:
+    async def _rephrase_question(self, messages: List[Dict[str, str]]) -> str:
         """Rephrase the latest question based on conversation history for optimized retrieval"""
         if len(messages) <= 1:
             return messages[-1]['content']
@@ -693,7 +693,7 @@ Standalone Question:"""
             logger.error(f"Error rephrasing question: {e}")
             return latest_question
 
-    def chat(
+    async def chat(
         self,
         messages: List[Dict[str, str]],
         top_k: int = 5,
@@ -712,11 +712,11 @@ Standalone Question:"""
             **kwargs: Additional parameters
         """
         # 1. Rephrase question for better retrieval
-        rephrased_query = self._rephrase_question(messages)
+        rephrased_query = await self._rephrase_question(messages)
         
         # 2. Retrieve documents using rephrased query
         query_embedding = self.embed_query(rephrased_query)
-        context_docs = self.retrieve_context(
+        context_docs = await self.retrieve_context(
             rephrased_query,
             query_embedding,
             top_k=top_k,
