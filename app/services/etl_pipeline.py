@@ -53,48 +53,85 @@ class ETLPipeline:
         
         logger.info("ETL Pipeline initialized")
     
-    async def run(
+    async def run_stream(
         self,
         source_type: str,
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
         batch_size: int = 32,
         store_in_qdrant: bool = True,
-        chunking_strategy: str = "fixed",  # "fixed" or "semantic"
         job_id: Optional[str] = None,
         **source_params
-    ) -> Dict[str, Any]:
+    ):
         """
-        Run complete ETL pipeline.
-        CPU-bound operations (chunking, embedding, storing) run in thread pool
-        to avoid blocking the event loop.
+        Run ETL pipeline in streaming mode. 
+        Highly memory efficient for large documents.
         """
-        logger.info(f"Starting ETL pipeline with source: {source_type}, strategy: {chunking_strategy}")
+        logger.info(f"Starting STREAMING ETL pipeline for: {source_type}")
         loop = asyncio.get_event_loop()
+        
+        # 1. Start Extraction Stream
+        if source_type not in self.data_sources:
+             raise ValueError(f"Unknown source type: {source_type}")
+        
+        data_source = self.data_sources[source_type]
+        doc_stream = data_source.extract_stream(**source_params)
+        
+        chunk_buffer = []
+        total_docs = 0
+        total_chunks = 0
 
-        # EXTRACT (async)
-        documents = await self.extract(source_type, **source_params)
+        async for doc in doc_stream:
+            total_docs += 1
+            
+            # 2. Chunk (CPU bound)
+            # Run chunking in thread pool to not block event loop
+            content = doc.get('content', '')
+            if not content:
+                continue
+                
+            doc_chunks = await loop.run_in_executor(
+                _executor,
+                self.chunk_documents,
+                [doc], chunk_size, chunk_overlap
+            )
+            
+            for chunk in doc_chunks:
+                chunk_buffer.append(chunk)
+                total_chunks += 1
+                
+                # 3. If buffer reaches batch_size, Embed & Store
+                if len(chunk_buffer) >= batch_size:
+                    await self._process_batch(chunk_buffer, batch_size, store_in_qdrant, job_id)
+                    chunk_buffer = []
 
-        # TRANSFORM - run in thread pool to avoid blocking
-        logger.info(f"Chunking {len(documents)} documents...")
-        chunks = await loop.run_in_executor(
-            _executor,
-            self.chunk_documents,
-            documents, chunk_size, chunk_overlap, chunking_strategy
-        )
+        # 4. Flush remaining chunks
+        if chunk_buffer:
+            await self._process_batch(chunk_buffer, batch_size, store_in_qdrant, job_id)
 
-        logger.info(f"Embedding {len(chunks)} chunks...")
+        logger.info(f"Streaming ETL complete. Processed {total_docs} docs into {total_chunks} chunks.")
+        return {
+            "status": "success",
+            "total_documents": total_docs,
+            "total_chunks": total_chunks,
+            "embedding_dimension": self.get_embedding_dimension(),
+            "storage": {"stored": total_chunks} if store_in_qdrant else None
+        }
+
+    async def _process_batch(self, chunks, batch_size, store_in_qdrant, job_id):
+        """Helper to embed and store a batch of chunks"""
+        loop = asyncio.get_event_loop()
+        
+        # Embed
         embedded_chunks = await loop.run_in_executor(
             _executor,
             self.embed_chunks,
             chunks, batch_size
         )
-
-        # LOAD (optional) - run in thread pool
-        storage_result = None
+        
+        # Store
         if store_in_qdrant:
-            logger.info(f"Storing {len(embedded_chunks)} vectors...")
-            storage_result = await loop.run_in_executor(
+            await loop.run_in_executor(
                 _executor,
                 self.store_vectors,
                 embedded_chunks,
@@ -102,17 +139,9 @@ class ETLPipeline:
                 job_id
             )
 
-        result = {
-            "status": "success",
-            "total_documents": len(documents),
-            "total_chunks": len(embedded_chunks),
-            "embedding_dimension": self.get_embedding_dimension(),
-            "embedded_chunks": embedded_chunks if not store_in_qdrant else None,
-            "storage": storage_result
-        }
-
-        logger.info(f"ETL pipeline complete: {len(embedded_chunks)} processed chunks")
-        return result
+    async def run(self, **kwargs) -> Dict[str, Any]:
+        """Backward compatibility: runs streaming ETL"""
+        return await self.run_stream(**kwargs)
 
     def _load_embedding_model(self):
         """Lazy load embedding models (Dense + Sparse)"""

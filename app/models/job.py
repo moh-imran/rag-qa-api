@@ -6,12 +6,14 @@ from pydantic import Field
 
 class Job(Document):
     job_id: str
+    name: str = "Unnamed Job"  # User-friendly job name with default
     status: str  # pending, running, completed, failed
     progress: float = 0.0
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     logs: List[str] = Field(default_factory=list)
     meta: Optional[Dict[str, Any]] = None
+    created_by: Optional[str] = None  # User ID or email of job creator
     created_at: datetime = Field(default_factory=datetime.utcnow)
     finished_at: Optional[datetime] = None
 

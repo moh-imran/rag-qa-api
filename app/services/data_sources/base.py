@@ -15,14 +15,20 @@ class BaseDataSource(ABC):
     @abstractmethod
     async def extract(self, **kwargs) -> List[Dict[str, Any]]:
         """
-        Extract data from source
-        
-        Returns:
-            List of documents with 'content' and 'metadata'
-            [{'content': 'text...', 'metadata': {...}}]
+        Extract all data from source into memory (Standard interface)
         """
         pass
-    
+
+    async def extract_stream(self, **kwargs):
+        """
+        Generator-based extraction to avoid memory overhead.
+        Yields documents as they are processed.
+        """
+        # Default implementation just calls extract if not overridden
+        docs = await self.extract(**kwargs)
+        for doc in docs:
+            yield doc
+
     def validate_output(self, documents: List[Dict[str, Any]]) -> bool:
         """Validate extracted documents have required fields"""
         for doc in documents:

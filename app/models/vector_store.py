@@ -81,22 +81,42 @@ class QdrantVectorStore:
                     logger.info(f"Collection '{self.collection_name}' already exists")
                     return
             
-            # Create collection with named vectors (Hybrid)
-            from qdrant_client.models import SparseVectorParams, Modifier
+            # Create collection with named vectors (Hybrid) + Performance Opts
+            from qdrant_client.models import (
+                SparseVectorParams, Modifier, ScalarQuantization, 
+                ScalarType, HnswConfigDiff, OptimizersConfigDiff
+            )
             
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config={
                     "text-dense": VectorParams(
                         size=vector_size,
-                        distance=distance
+                        distance=distance,
+                        on_disk=True  # Support memory-efficient search for huge datasets
                     )
                 },
                 sparse_vectors_config={
                     "text-sparse": SparseVectorParams(
                         modifier=Modifier.IDF
                     )
-                }
+                },
+                # Enable Scalar Quantization to reduce RAM usage by 4x and speed up search
+                quantization_config=ScalarQuantization(
+                    scalar=ScalarType.INT8,
+                    always_ram=True,
+                    quantile=0.99
+                ),
+                # Optimize HNSW index for fast retrieval
+                hnsw_config=HnswConfigDiff(
+                    m=16,
+                    ef_construct=100,
+                    on_disk=True  # Keep index on disk to save RAM at scale
+                ),
+                # Optimization threshold for batch uploads
+                optimizers_config=OptimizersConfigDiff(
+                    indexing_threshold=10000  # Delay indexing until batch significantly loaded
+                )
             )
             logger.info(f"✅ Created HYBRID collection '{self.collection_name}' (Dense: {vector_size}, Sparse: configured)")
             

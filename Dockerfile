@@ -34,16 +34,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Optimize pip
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_NO_CACHE_DIR=1
 
-# Copy only requirements first (for layer caching)
+# Step 1: Install heavy, stable dependencies first (Torch CPU)
+# This layer stays cached unless we change the version
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+# Step 2: Copy and install requirements
 COPY requirements.txt .
-
-# Install dependencies with BuildKit cache mount
-# This caches downloaded packages between builds
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --prefer-binary -r requirements.txt
+    pip install --default-timeout=1000 --retries 10 --prefer-binary -r requirements.txt
 
-# Install Playwright and Chromium browser for JS-heavy sites
+# Step 3: Install Playwright (Browsers are independent of code)
 RUN playwright install chromium && \
     playwright install-deps chromium
 
