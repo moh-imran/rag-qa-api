@@ -18,7 +18,8 @@ services:
       - CROSS_ENCODER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
       - EMBEDDING_PROVIDER=huggingface
       - EMBEDDING_MODEL=all-MiniLM-L6-v2
-      - MONGODB_URL=mongodb://mongodb:27017/rag_chat
+      - MONGODB_URL=mongodb://admin:secret@mongodb:27017/rag_chat?authSource=admin
+      - QDRANT_API_KEY=secret
     networks:
       - rag-shared-network
     depends_on:
@@ -26,9 +27,11 @@ services:
 
   qdrant:
     image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"
-      - "6334:6334"
+    # ports:
+    #   - "6333:6333"
+    #   - "6334:6334"
+    environment:
+      - QDRANT__SERVICE__API_KEY=secret
     volumes:
       - qdrant_storage:/qdrant/storage
     restart: unless-stopped

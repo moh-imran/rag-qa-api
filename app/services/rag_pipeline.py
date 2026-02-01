@@ -26,6 +26,7 @@ class RAGPipeline:
         openai_model: str = "gpt-4o-mini",
         qdrant_host: str = "localhost",
         qdrant_port: int = 6333,
+        qdrant_api_key: str = None,
         collection_name: str = "documents",
         collections: Optional[Dict[str, str]] = None
     ):
@@ -40,6 +41,7 @@ class RAGPipeline:
             openai_model: OpenAI model name (e.g., gpt-4o-mini)
             qdrant_host: Qdrant server host
             qdrant_port: Qdrant server port
+            qdrant_api_key: Qdrant API key for authentication
             collection_name: Qdrant collection name
             collections: Optional dict of collection names to descriptions for federated search
         """
@@ -52,6 +54,7 @@ class RAGPipeline:
         self.openai_api_key = openai_api_key
         self.qdrant_host = qdrant_host
         self.qdrant_port = qdrant_port
+        self.qdrant_api_key = qdrant_api_key
         
         # Configure OpenAI
         if openai_api_key:
@@ -65,6 +68,7 @@ class RAGPipeline:
         self.vector_store = QdrantVectorStore(
             host=qdrant_host,
             port=qdrant_port,
+            api_key=qdrant_api_key,
             collection_name=collection_name
         )
         
@@ -201,16 +205,22 @@ Answer:"""
         
         # 1. Generate Sparse Vector for Hybrid Search
         sparse_vector = self.embed_query_sparse(query)
-        
+
         # 2. Initial Retrieval (Fetch more candidates for reranking)
         initial_top_k = top_k * 3
-        results = self.vector_store.search(
-            query_vector=query_embedding,
-            sparse_vector=sparse_vector,
-            limit=initial_top_k,
-            score_threshold=score_threshold,
-            filter_dict=metadata_filters
-        )
+        try:
+            results = self.vector_store.search(
+                query_vector=query_embedding,
+                sparse_vector=sparse_vector,
+                limit=initial_top_k,
+                score_threshold=score_threshold,
+                filter_dict=metadata_filters
+            )
+        except Exception as e:
+            if "Not found" in str(e) or "404" in str(e):
+                logger.warning(f"Collection '{self.vector_store.collection_name}' not found. Returning empty results.")
+                return []
+            raise
         
         if not results:
             return []
