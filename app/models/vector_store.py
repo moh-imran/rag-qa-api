@@ -22,6 +22,7 @@ class QdrantVectorStore:
         self,
         host: str = "localhost",
         port: int = 6333,
+        api_key: Optional[str] = None,
         collection_name: str = "documents"
     ):
         """
@@ -30,15 +31,23 @@ class QdrantVectorStore:
         Args:
             host: Qdrant server host
             port: Qdrant server port
+            api_key: Qdrant API key for authentication
             collection_name: Name of the collection to use
         """
         self.host = host
         self.port = port
+        self.api_key = api_key
         self.collection_name = collection_name
         
         # Initialize client
-        self.client = QdrantClient(host=host, port=port)
-        logger.info(f"Initialized Qdrant vector store: {host}:{port}/{collection_name}")
+        if api_key:
+            # Explicitly set https=False for local/docker hosts to avoid SSL errors,
+            # as qdrant-client might default to True when an api_key is present.
+            self.client = QdrantClient(host=host, port=port, api_key=api_key, https=False)
+            logger.info(f"Initialized Authenticated Qdrant vector store: {host}:{port}/{collection_name}")
+        else:
+            self.client = QdrantClient(host=host, port=port)
+            logger.info(f"Initialized Qdrant vector store: {host}:{port}/{collection_name}")
     
     def switch_collection(self, collection_name: str):
         """Switch to a different collection"""
@@ -84,7 +93,8 @@ class QdrantVectorStore:
             # Create collection with named vectors (Hybrid) + Performance Opts
             from qdrant_client.models import (
                 SparseVectorParams, Modifier, ScalarQuantization, 
-                ScalarType, HnswConfigDiff, OptimizersConfigDiff
+                ScalarType, HnswConfigDiff, OptimizersConfigDiff,
+                ScalarQuantizationConfig
             )
             
             self.client.create_collection(
@@ -103,9 +113,11 @@ class QdrantVectorStore:
                 },
                 # Enable Scalar Quantization to reduce RAM usage by 4x and speed up search
                 quantization_config=ScalarQuantization(
-                    scalar=ScalarType.INT8,
-                    always_ram=True,
-                    quantile=0.99
+                    scalar=ScalarQuantizationConfig(
+                        type=ScalarType.INT8,
+                        always_ram=True,
+                        quantile=0.99
+                    )
                 ),
                 # Optimize HNSW index for fast retrieval
                 hnsw_config=HnswConfigDiff(

@@ -36,6 +36,7 @@ async def startup_event():
 embedding_provider = os.getenv("EMBEDDING_PROVIDER", "huggingface")
 embedding_model = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 openai_api_key = os.getenv("OPENAI_API_KEY")
+qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
 etl_pipeline = ETLPipeline(
     embedding_provider=embedding_provider,
@@ -43,6 +44,7 @@ etl_pipeline = ETLPipeline(
     openai_api_key=openai_api_key,
     qdrant_host="qdrant",
     qdrant_port=6333,
+    qdrant_api_key=qdrant_api_key,
     collection_name="documents"
 )
 
@@ -55,6 +57,7 @@ rag_pipeline = RAGPipeline(
     openai_model="gpt-4o-mini",
     qdrant_host="qdrant",
     qdrant_port=6333,
+    qdrant_api_key=qdrant_api_key,
     collection_name="documents"
 )
 

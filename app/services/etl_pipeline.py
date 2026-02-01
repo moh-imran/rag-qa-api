@@ -30,12 +30,14 @@ class ETLPipeline:
         openai_api_key: str = None,
         qdrant_host: str = "localhost",
         qdrant_port: int = 6333,
+        qdrant_api_key: str = None,
         collection_name: str = "documents"
     ):
         self.embedding_provider_type = embedding_provider
         self.embedding_model_name = embedding_model
         self.embedding_provider = None
         self.openai_api_key = openai_api_key
+        self.qdrant_api_key = qdrant_api_key
         self.data_sources = {
             'file': FileSource(),
             'web': WebSource(),
@@ -48,6 +50,7 @@ class ETLPipeline:
         self.vector_store = QdrantVectorStore(
             host=qdrant_host,
             port=qdrant_port,
+            api_key=qdrant_api_key,
             collection_name=collection_name
         )
         
