@@ -37,6 +37,8 @@ jobs:
             CROSS_ENCODER_MODEL=${{ vars.CROSS_ENCODER_MODEL || 'cross-encoder/ms-marco-MiniLM-L-6-v2' }}
             EMBEDDING_PROVIDER=${{ vars.EMBEDDING_PROVIDER || 'huggingface' }}
             EMBEDDING_MODEL=${{ vars.EMBEDDING_MODEL || 'all-MiniLM-L6-v2' }}
-            MONGODB_URL=${{ vars.MONGODB_URL || 'mongodb://mongodb:27017/rag_chat' }}
+            MONGODB_URL=${{ secrets.MONGODB_URL }}
+            QDRANT__SERVICE__API_KEY=${{ secrets.QDRANT__SERVICE__API_KEY }}
+            QDRANT_API_KEY=${{ secrets.QDRANT_API_KEY }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
