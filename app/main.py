@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 import logging
 import os
+from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -28,6 +29,19 @@ async def startup_event():
     # Initialize MongoDB / Beanie for job persistence (optional - if MONGODB_URL provided)
     mongodb_url = os.getenv("MONGODB_URL", "mongodb://mongodb:27017/rag_chat")
     if mongodb_url:
+        # Process MONGODB_URL to escape username and password if present
+        if "://" in mongodb_url and "@" in mongodb_url:
+            try:
+                scheme, rest = mongodb_url.split("://", 1)
+                userinfo, host_rest = rest.rsplit("@", 1)
+                if ":" in userinfo:
+                    username, password = userinfo.split(":", 1)
+                    mongodb_url = f"{scheme}://{quote_plus(username)}:{quote_plus(password)}@{host_rest}"
+                else:
+                    mongodb_url = f"{scheme}://{quote_plus(userinfo)}@{host_rest}"
+            except Exception as e:
+                logger.warning(f"Failed to parse MONGODB_URL for escaping: {e}")
+
         client = AsyncIOMotorClient(mongodb_url)
         await init_beanie(database=client.get_default_database(), document_models=[Job])
         logging.getLogger(__name__).info("Initialized Beanie with MongoDB for job persistence")
