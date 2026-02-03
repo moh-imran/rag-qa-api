@@ -50,7 +50,8 @@ class WebSource(BaseDataSource):
 
     def __init__(self):
         super().__init__("WebSource")
-        self.max_pages = 50  # Limit crawl to prevent runaway
+        self.max_pages = 100  # Increased from 50
+        self.min_content_length = 50  # Configurable threshold
         self._browser = None
         self._playwright = None
 
@@ -176,6 +177,7 @@ class WebSource(BaseDataSource):
         wait_time: int = 3000,
         auto_dismiss_popups: bool = True,
         wait_for_selector: str = None,
+        min_content_length: int = 50,
         **kwargs
     ) -> List[Dict[str, Any]]:
         """
@@ -225,6 +227,7 @@ class WebSource(BaseDataSource):
         self._wait_time = wait_time
         self._auto_dismiss_popups = auto_dismiss_popups
         self._wait_for_selector = wait_for_selector
+        self.min_content_length = min_content_length
 
         try:
             for start_url in urls:
@@ -311,8 +314,8 @@ class WebSource(BaseDataSource):
                 # Parse HTML
                 soup = BeautifulSoup(response.content, 'html.parser')
 
-            # Remove unwanted elements
-            for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe"]):
+            # Remove unwanted elements - Keeping 'header' and 'aside' as they often contain useful context
+            for element in soup(["script", "style", "nav", "footer", "noscript", "iframe"]):
                 element.decompose()
 
             # Extract text
@@ -323,7 +326,7 @@ class WebSource(BaseDataSource):
             text = '\n'.join(line for line in lines if line)
 
             # Only add if we have meaningful content
-            if text and len(text) > 50:
+            if text and len(text) > self.min_content_length:
                 # Get page title
                 title = soup.title.string.strip() if soup.title and soup.title.string else urlparse(url).path or url
 
@@ -356,8 +359,12 @@ class WebSource(BaseDataSource):
                     next_url = urljoin(url, href)
                     next_parsed = urlparse(next_url)
 
-                    # Only follow links on same domain
-                    if next_parsed.netloc == base_domain and next_url not in visited:
+                    # Follow links on same domain OR subdomains
+                    target_netloc = next_parsed.netloc.lower()
+                    is_same_domain = target_netloc == base_domain
+                    is_subdomain = target_netloc.endswith('.' + base_domain) or base_domain.endswith('.' + target_netloc)
+                    
+                    if (is_same_domain or is_subdomain) and next_url not in visited:
                         # Skip common non-content URLs
                         skip_patterns = ['/login', '/signup', '/register', '/logout', '/cart', '/checkout']
                         if not any(pattern in next_url.lower() for pattern in skip_patterns):

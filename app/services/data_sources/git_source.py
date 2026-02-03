@@ -23,7 +23,7 @@ class GitSource(BaseDataSource):
             '.sql', '.graphql', '.proto', '.toml', '.ini', '.cfg',
             '.dockerfile', '.makefile', '.cmake', '.gradle'
         }
-        self.max_file_size = 512 * 1024  # 512KB max per file
+        self.max_file_size = 1024 * 1024  # 1MB max per file (increased from 512KB)
 
     async def extract(
         self,
@@ -63,14 +63,21 @@ class GitSource(BaseDataSource):
             clone_env['GIT_TERMINAL_PROMPT'] = '0'
 
             try:
-                repo = Repo.clone_from(
-                    repo_url,
-                    temp_dir,
-                    branch=branch,
-                    depth=1,
-                    env=clone_env,
-                    kill_after_timeout=180  # 3 minute timeout for clone
-                )
+                # Only use kill_after_timeout if supported (not on Windows)
+                clone_params = {
+                    "url": repo_url,
+                    "to_path": temp_dir,
+                    "branch": branch,
+                    "depth": 1,
+                    "env": clone_env
+                }
+                
+                if os.name != 'nt':  # 'nt' is Windows
+                    clone_params["kill_after_timeout"] = 180
+                else:
+                    logger.debug("Skipping kill_after_timeout as it is not supported on Windows")
+
+                repo = Repo.clone_from(**clone_params)
                 logger.info(f"Successfully cloned repository {repo_url}")
             except GitCommandError as e:
                 error_msg = str(e).lower()
@@ -93,21 +100,44 @@ class GitSource(BaseDataSource):
 
             for file_path in repo_path.rglob('*'):
                 if file_path.is_file():
-                    # Skip hidden files and directories
-                    if any(part.startswith('.') for part in file_path.parts):
+                    # Skip .git directory explicitly
+                    if '.git' in file_path.parts:
                         continue
 
+                    # Skip hidden files/dirs EXCEPT .github and other config-heavy dirs
+                    important_hidden_dirs = {'.github', '.vscode', '.idea'}
+                    if any(part.startswith('.') for part in file_path.parts):
+                        # If it's a hidden part, check if it's one we want to keep
+                        if not any(important in file_path.parts for important in important_hidden_dirs):
+                            # It's a hidden file/dir that isn't in our "important" list
+                            continue
+
                     # Skip node_modules, vendor, and other common large directories
-                    skip_dirs = {'node_modules', 'vendor', 'venv', '.venv', '__pycache__', 'dist', 'build', 'target'}
+                    skip_dirs = {
+                        'node_modules', 'vendor', 'venv', '.venv', '__pycache__', 
+                        'dist', 'build', 'target', '.pytest_cache', '.next', 'out',
+                        'logs', 'coverage', 'htmlcov'
+                    }
                     if any(part in skip_dirs for part in file_path.parts):
                         continue
 
                     # Check extension
                     suffix = file_path.suffix.lower()
-                    # Also check for files without extension (like Dockerfile, Makefile)
+                    # Also check for files without extension or with common config names
                     filename_lower = file_path.name.lower()
-                    if suffix not in extensions and filename_lower not in {'dockerfile', 'makefile', 'readme', 'license'}:
-                        continue
+                    
+                    # Expanded list of "always include" filenames
+                    always_include_files = {
+                        'dockerfile', 'makefile', 'readme', 'license', 
+                        'procfile', 'gemfile', 'package.json', 'composer.json'
+                    }
+                    
+                    if suffix not in extensions and filename_lower not in always_include_files:
+                        # For hidden files in important directories, we might want to be more lenient
+                        # e.g. .github/workflows/*.yml (which might be covered by .yml but good to be explicit)
+                        if not (any(important in file_path.parts for important in important_hidden_dirs) and 
+                                suffix in {'.yml', '.yaml', '.json', '.sh', '.js', '.ts'}):
+                            continue
 
                     # Check file size
                     try:
