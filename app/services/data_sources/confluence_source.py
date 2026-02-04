@@ -27,6 +27,11 @@ class ConfluenceSource(BaseDataSource):
         self.session.headers.update({
             'Accept': 'application/json'
         })
+        try:
+            from markitdown import MarkItDown
+            self._markitdown = MarkItDown()
+        except ImportError:
+            self._markitdown = None
 
     def _normalize_base_url(self, url: str) -> str:
         """Extract base wiki URL from various Confluence URL formats."""
@@ -83,101 +88,80 @@ class ConfluenceSource(BaseDataSource):
             return match.group(1)
         return None
 
-    async def extract(self, space_key: str = None, content_id: str = None, url: str = None, limit: int = 50, **kwargs) -> List[Dict[str, Any]]:
-        """Extract content from Confluence.
+    async def extract(self, **kwargs) -> List[Dict[str, Any]]:
+        """Standard batch extraction (returns list)"""
+        docs = []
+        async for doc in self.extract_stream(**kwargs):
+            docs.append(doc)
+        return docs
 
-        Args:
-            space_key: Confluence space key to fetch all pages from
-            content_id: Specific content/page ID to fetch
-            url: Full Confluence URL (will extract space_key or content_id automatically)
-            limit: Maximum number of pages to fetch
-        """
-        documents: List[Dict[str, Any]] = []
-
-        # If URL provided, try to extract space_key or content_id from it
+    async def extract_stream(
+        self,
+        space_key: str = None,
+        content_id: str = None,
+        url: str = None,
+        limit: int = 50,
+        **kwargs
+    ):
+        """Extract content from Confluence as a stream."""
         if url and not space_key and not content_id:
             content_id = self._extract_content_id_from_url(url)
             if not content_id:
                 space_key = self._extract_space_key_from_url(url)
 
         try:
-            # First, verify authentication
-            test_url = f"{self.base_url}/rest/api/space?limit=1"
-            logger.info(f"Testing Confluence connection: {test_url}")
-            test_resp = self.session.get(test_url, timeout=30)
-
+            # Test connection
+            test_resp = self.session.get(f"{self.base_url}/rest/api/space?limit=1", timeout=10)
             if test_resp.status_code == 401:
-                raise ValueError("Confluence authentication failed. Check your email and API token.")
-            elif test_resp.status_code == 403:
-                raise ValueError("Confluence access denied. Your account may not have permission.")
-            elif test_resp.status_code >= 400:
-                raise ValueError(f"Confluence API error: {test_resp.status_code} - {test_resp.text[:200]}")
+                raise ValueError("Confluence authentication failed.")
 
             if content_id:
-                # Fetch single content by id
-                logger.info(f"Fetching Confluence page with ID: {content_id}")
-                url = f"{self.base_url}/rest/api/content/{content_id}?expand=body.storage,version,metadata.labels"
-                resp = self.session.get(url, timeout=30)
-
-                if resp.status_code == 404:
-                    raise ValueError(f"Confluence page not found with ID: {content_id}")
-                resp.raise_for_status()
-
-                obj = resp.json()
-                docs = self._content_to_docs(obj)
-                documents.extend(docs)
-
+                logger.info(f"Fetching Confluence page ID: {content_id}")
+                page_url = f"{self.base_url}/rest/api/content/{content_id}?expand=body.storage,version,metadata.labels"
+                resp = self.session.get(page_url, timeout=30)
+                if resp.status_code == 200:
+                    for doc in self._content_to_docs(resp.json()):
+                        yield doc
             elif space_key:
-                # Query space for pages
-                logger.info(f"Fetching pages from Confluence space: {space_key}")
                 start = 0
-                while True:
-                    url = f"{self.base_url}/rest/api/content"
+                count = 0
+                while count < limit:
+                    fetch_url = f"{self.base_url}/rest/api/content"
                     params = {
                         'spaceKey': space_key,
-                        'limit': min(limit, 50),
+                        'limit': min(limit - count, 50),
                         'start': start,
                         'expand': 'body.storage,version,metadata.labels'
                     }
-                    resp = self.session.get(url, params=params, timeout=30)
-
-                    if resp.status_code == 404:
-                        raise ValueError(f"Confluence space not found: {space_key}")
-                    resp.raise_for_status()
-
+                    resp = self.session.get(fetch_url, params=params, timeout=30)
+                    if resp.status_code != 200: break
+                    
                     data = resp.json()
                     results = data.get('results', [])
-
-                    if not results:
-                        if start == 0:
-                            logger.warning(f"No pages found in Confluence space: {space_key}")
-                        break
+                    if not results: break
 
                     for item in results:
-                        documents.extend(self._content_to_docs(item))
-
+                        for doc in self._content_to_docs(item):
+                            yield doc
+                            count += 1
+                        if count >= limit: break
+                    
                     if data.get('size', 0) + data.get('start', 0) >= data.get('totalSize', 0):
                         break
-                    start += data.get('size', 0) or 0
-                    if len(documents) >= limit:
-                        break
+                    start += data.get('size', 0)
             else:
-                # No content_id or space_key - try to list all spaces and get pages
-                logger.info("No space_key or content_id provided, fetching all accessible spaces...")
-                spaces_resp = self.session.get(f"{self.base_url}/rest/api/space?limit=10", timeout=30)
-                spaces_resp.raise_for_status()
-                spaces = spaces_resp.json().get('results', [])
+                logger.info("No space_key, fetching from first available space...")
+                spaces_resp = self.session.get(f"{self.base_url}/rest/api/space?limit=1", timeout=30)
+                if spaces_resp.status_code == 200:
+                    results = spaces_resp.json().get('results', [])
+                    if results:
+                        async for doc in self.extract_stream(space_key=results[0]['key'], limit=limit):
+                            yield doc
 
-                if not spaces:
-                    raise ValueError("No Confluence spaces found. Provide a space_key or content_id.")
-
-                # Get pages from first space
-                first_space = spaces[0]['key']
-                logger.info(f"Using first available space: {first_space}")
-                return await self.extract(space_key=first_space, limit=limit)
-
-            logger.info(f"Extracted {len(documents)} documents from Confluence")
-            return documents
+        except Exception as e:
+            logger.error(f"Confluence extraction failed: {e}")
+            if isinstance(e, ValueError): raise
+            raise ValueError(f"Confluence extraction failed: {str(e)[:200]}")
 
         except ValueError:
             raise
@@ -193,15 +177,39 @@ class ConfluenceSource(BaseDataSource):
         docs: List[Dict[str, Any]] = []
         try:
             storage = content_obj.get('body', {}).get('storage', {}).get('value', '')
-            # storage is HTML — convert to plain text
-            text = BeautifulSoup(storage, 'html.parser').get_text(separator='\n', strip=True)
+            if not storage:
+                return docs
+
+            # Use MarkItDown if available for better HTML -> MD conversion
+            text = ""
+            if self._markitdown:
+                try:
+                    # MarkItDown typically takes a file or URL, but we can wrap HTML
+                    import tempfile
+                    import os
+                    with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
+                        tmp.write(storage.encode('utf-8'))
+                        tmp_path = tmp.name
+                    try:
+                        result = self._markitdown.convert(tmp_path)
+                        text = result.text_content
+                    finally:
+                        if os.path.exists(tmp_path):
+                            os.unlink(tmp_path)
+                except Exception as e:
+                    logger.debug(f"MarkItDown conversion failed: {e}")
+            
+            if not text:
+                text = BeautifulSoup(storage, 'html.parser').get_text(separator='\n', strip=True)
 
             if not text.strip():
-                return docs  # Skip empty pages
+                return docs
 
             title = content_obj.get('title') or content_obj.get('metadata', {}).get('title', '')
             cid = content_obj.get('id')
             page_url = f"{self.base_url}/pages/{cid}"
+            version = content_obj.get('version', {}).get('number')
+            updated = content_obj.get('version', {}).get('friendlyWhen')
 
             docs.append({
                 'content': text,
@@ -210,7 +218,9 @@ class ConfluenceSource(BaseDataSource):
                     'content_id': cid,
                     'title': title,
                     'type': 'confluence_page',
-                    'url': page_url
+                    'url': page_url,
+                    'version': version,
+                    'last_updated': updated
                 }
             })
         except Exception as e:

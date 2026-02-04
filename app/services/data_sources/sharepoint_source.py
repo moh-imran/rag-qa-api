@@ -28,79 +28,96 @@ class SharePointSource(BaseDataSource):
             'Accept': 'application/json'
         })
 
-    async def extract(self, path: str = '/', max_items: int = 100, **kwargs) -> List[Dict[str, Any]]:
-        documents: List[Dict[str, Any]] = []
+    async def extract(self, **kwargs) -> List[Dict[str, Any]]:
+        """Standard batch extraction (returns list)"""
+        docs = []
+        async for doc in self.extract_stream(**kwargs):
+            docs.append(doc)
+        return docs
 
+    async def extract_stream(self, path: str = '/', max_items: int = 100, **kwargs):
+        """Extract documents from SharePoint as a stream"""
         if not self.site_id:
             raise ValueError("Missing 'site_id' for SharePointSource")
 
         try:
-            # List children of root folder
-            url = f"{self.GRAPH_BASE}/sites/{self.site_id}/drive/root/children"
-            resp = self.session.get(url, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
+            # Graph API URL for children of a site's drive
+            # If path is '/', we use 'root', otherwise we use folder ID or relative path
+            if path == '/':
+                url = f"{self.GRAPH_BASE}/sites/{self.site_id}/drive/root/children"
+            else:
+                # Handle relative path or item ID
+                url = f"{self.GRAPH_BASE}/sites/{self.site_id}/drive/root:/{path.strip('/')}:/children"
 
             count = 0
-            for item in data.get('value', []):
-                if count >= max_items:
-                    break
-                name = item.get('name', '')
-                file_ext = (name.split('.')[-1].lower() if '.' in name else '')
-                download_url = f"{self.GRAPH_BASE}/sites/{self.site_id}/drive/items/{item['id']}/content"
-                dresp = self.session.get(download_url, timeout=60)
-                if dresp.status_code != 200:
-                    continue
-                # Handle different types
-                if file_ext in ('txt', 'md'):
-                    text = dresp.text
-                elif file_ext == 'html':
-                    text = BeautifulSoup(dresp.text, 'html.parser').get_text(separator='\n', strip=True)
-                elif file_ext == 'docx':
-                    try:
-                        from docx import Document as DocxDocument
-                        import io
-                        doc = DocxDocument(io.BytesIO(dresp.content))
-                        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-                        text = '\n\n'.join(paragraphs)
-                    except Exception as e:
-                        logger.warning(f"Failed to parse docx {name}: {e}")
-                        continue
-                elif file_ext == 'pdf':
-                    try:
-                        import io
-                        from PyPDF2 import PdfReader
-                        reader = PdfReader(io.BytesIO(dresp.content))
-                        pages = []
-                        for p in reader.pages:
-                            try:
-                                t = p.extract_text() or ''
-                                pages.append(t)
-                            except Exception:
-                                continue
-                        text = '\n\n'.join(pages)
-                    except Exception as e:
-                        logger.warning(f"Failed to parse pdf {name}: {e}")
-                        continue
-                else:
-                    # unsupported type
-                    continue
+            while url and count < max_items:
+                resp = self.session.get(url, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
 
-                if text and text.strip():
-                    documents.append({
-                        'content': text,
-                        'metadata': {
-                            'source': self.source_name,
-                            'item_id': item.get('id'),
-                            'filename': name,
-                            'type': f'sharepoint_{file_ext}',
-                            'size_bytes': item.get('size')
-                        }
-                    })
-                    count += 1
+                for item in data.get('value', []):
+                    if count >= max_items: break
+                    
+                    # Process file - check if it has a 'file' facet
+                    if 'file' not in item: continue 
+                    
+                    name = item.get('name', '')
+                    download_url = item.get('@microsoft.graph.downloadUrl') or f"{self.GRAPH_BASE}/sites/{self.site_id}/drive/items/{item['id']}/content"
+                    
+                    try:
+                        dresp = self.session.get(download_url, timeout=60)
+                        if dresp.status_code == 200:
+                            doc = self._process_file_content(name, dresp.content, item)
+                            if doc:
+                                yield doc
+                                count += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to process SharePoint file {name}: {e}")
 
-            logger.info(f"Extracted {len(documents)} documents from SharePoint site {self.site_id}")
-            return documents
+                url = data.get('@odata.nextLink') # Handle pagination
+
+            logger.info(f"Finished SharePoint extraction for site {self.site_id}")
+
         except Exception as e:
-            logger.error(f"Error extracting SharePoint content: {e}")
-            raise
+            logger.error(f"SharePoint extraction failed: {e}")
+            raise ValueError(f"SharePoint extraction failed: {str(e)[:200]}")
+
+    def _process_file_content(self, name: str, content: bytes, item: Dict) -> Optional[Dict[str, Any]]:
+        """Process binary content into a document"""
+        file_ext = (name.split('.')[-1].lower() if '.' in name else '')
+        text = ""
+
+        try:
+            if file_ext in ('txt', 'md'):
+                text = content.decode('utf-8', errors='ignore')
+            elif file_ext == 'html':
+                text = BeautifulSoup(content, 'html.parser').get_text(separator='\n', strip=True)
+            elif file_ext == 'docx':
+                import io
+                from docx import Document
+                doc = Document(io.BytesIO(content))
+                text = '\n\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
+            elif file_ext == 'pdf':
+                import io
+                from PyPDF2 import PdfReader
+                reader = PdfReader(io.BytesIO(content))
+                text = '\n\n'.join([p.extract_text() or '' for p in reader.pages])
+            
+            if text and text.strip():
+                return {
+                    'content': text,
+                    'metadata': {
+                        'source': self.source_name,
+                        'item_id': item.get('id'),
+                        'filename': name,
+                        'type': f'sharepoint_{file_ext}',
+                        'size_bytes': item.get('size'),
+                        'web_url': item.get('webUrl'),
+                        'last_modified': item.get('lastModifiedDateTime'),
+                        'created_at': item.get('createdDateTime')
+                    }
+                }
+        except Exception as e:
+            logger.debug(f"Failed to parse {name}: {e}")
+        
+        return None

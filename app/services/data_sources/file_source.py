@@ -134,7 +134,7 @@ class FileSource(BaseDataSource):
 
         suffix = path.suffix.lower()
         if suffix not in self.supported_formats:
-            return
+            raise ValueError(f"Unsupported format: {suffix}")
 
         # Large files (PDF, CSV) are yielded page-by-page or batch-by-batch
         if suffix == '.pdf':
@@ -225,8 +225,10 @@ class FileSource(BaseDataSource):
 
     async def _extract_pdf_stream(self, path: Path):
         """Yield PDF content page-by-page"""
+        doc = None
         try:
             import fitz
+            # Open the file
             doc = fitz.open(str(path))
             
             # Check for encryption
@@ -256,14 +258,11 @@ class FileSource(BaseDataSource):
                             'type': 'pdf'
                         }
                     }
-            doc.close()
-        except ImportError:
-            # Fallback to batch if fitz missing (though ideally fitz should be there)
-            content, method = self._extract_pdf(path)
-            yield {
-                'content': content,
-                'metadata': {'source': self.source_name, 'filename': path.name, 'type': 'pdf', 'method': method}
-            }
+        finally:
+            if doc:
+                doc.close()
+            import gc
+            gc.collect() # Help Windows release file locks
 
     async def _extract_csv_stream(self, path: Path, batch_size: int = 100):
         """Yield CSV content in batches of rows"""
