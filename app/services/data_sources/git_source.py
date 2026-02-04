@@ -116,7 +116,8 @@ class GitSource(BaseDataSource):
                     skip_dirs = {
                         'node_modules', 'vendor', 'venv', '.venv', '__pycache__', 
                         'dist', 'build', 'target', '.pytest_cache', '.next', 'out',
-                        'logs', 'coverage', 'htmlcov'
+                        'logs', 'coverage', 'htmlcov', '.git', '.tox', '.mypy_cache',
+                        '.cache', 'bower_components'
                     }
                     if any(part in skip_dirs for part in file_path.parts):
                         continue

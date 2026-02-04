@@ -20,120 +20,82 @@ class NotionSource(BaseDataSource):
             self.client = Client(auth=api_key)
         except ImportError:
             raise ValueError("notion-client is not installed. Install it with: pip install notion-client")
+        
+        self.supported_blocks = {
+            'paragraph', 'heading_1', 'heading_2', 'heading_3', 
+            'bulleted_list_item', 'numbered_list_item', 'to_do', 
+            'toggle', 'code', 'quote', 'callout', 'equation'
+        }
     
-    async def extract(
+    async def extract(self, **kwargs) -> List[Dict[str, Any]]:
+        """Standard batch extraction (returns list)"""
+        docs = []
+        async for doc in self.extract_stream(**kwargs):
+            docs.append(doc)
+        return docs
+
+    async def extract_stream(
         self,
         database_id: str = None,
         page_id: str = None,
         **kwargs
-    ) -> List[Dict[str, Any]]:
+    ):
         """
-        Extract content from Notion
-
-        Args:
-            database_id: Notion database ID to extract
-            page_id: Specific page ID to extract
-
-        Returns:
-            List of documents with content and metadata
+        Extract content from Notion as a stream
         """
         from notion_client import APIResponseError
 
-        documents = []
-
         try:
-            # Test the API key by making a simple request
+            # Test API key
             try:
                 self.client.users.me()
             except APIResponseError as e:
                 if e.status == 401:
-                    raise ValueError("Notion API key is invalid or expired. Please check your integration token.")
+                    raise ValueError("Notion API key is invalid or expired.")
                 raise
 
             if database_id:
-                documents.extend(await self._extract_database(database_id))
+                async for doc in self._extract_database_stream(database_id):
+                    yield doc
             elif page_id:
-                documents.extend(await self._extract_page(page_id))
+                async for doc in self._extract_page_stream(page_id):
+                    yield doc
             else:
-                # If no database_id or page_id, try to list all accessible pages
-                logger.info("No database_id or page_id provided, searching for accessible content...")
-                try:
-                    search_results = self.client.search(filter={"property": "object", "value": "page"}, page_size=50)
-                    for page in search_results.get('results', []):
-                        page_docs = await self._extract_page(page['id'])
-                        documents.extend(page_docs)
-                    if not documents:
-                        raise ValueError("No accessible pages found. Make sure your integration has access to at least one page or database.")
-                except APIResponseError as e:
-                    raise ValueError(f"Notion search failed: {str(e)[:200]}")
+                logger.info("No database_id or page_id, searching for accessible pages...")
+                search_results = self.client.search(filter={"property": "object", "value": "page"}, page_size=10)
+                for page in search_results.get('results', []):
+                    async for doc in self._extract_page_stream(page['id']):
+                        yield doc
 
-            logger.info(f"Extracted {len(documents)} documents from Notion")
-            return documents
-
-        except ValueError:
-            raise
-        except APIResponseError as e:
-            if e.status == 401:
-                raise ValueError("Notion API authentication failed. Check your API key.")
-            elif e.status == 403:
-                raise ValueError("Notion access denied. Make sure your integration has access to the requested content.")
-            elif e.status == 404:
-                raise ValueError("Notion content not found. Check the database_id or page_id.")
-            raise ValueError(f"Notion API error: {str(e)[:200]}")
         except Exception as e:
-            logger.error(f"Error extracting from Notion: {e}")
+            logger.error(f"Notion extraction failed: {e}")
+            if isinstance(e, ValueError): raise
             raise ValueError(f"Notion extraction failed: {str(e)[:200]}")
     
-    async def _extract_database(self, database_id: str) -> List[Dict[str, Any]]:
-        """Extract all pages from a Notion database"""
-        from notion_client import APIResponseError
+    async def _extract_database_stream(self, database_id: str):
+        """Extract pages from a database as a stream"""
+        has_more = True
+        start_cursor = None
 
-        documents = []
+        while has_more:
+            query_params = {"database_id": database_id}
+            if start_cursor:
+                query_params["start_cursor"] = start_cursor
 
+            results = self.client.databases.query(**query_params)
+            for page in results.get('results', []):
+                async for doc in self._extract_page_stream(page['id']):
+                    yield doc
+
+            has_more = results.get('has_more', False)
+            start_cursor = results.get('next_cursor')
+
+    async def _extract_page_stream(self, page_id: str):
+        """Extract content from a single page as a stream"""
         try:
-            # Query database with pagination
-            has_more = True
-            start_cursor = None
-
-            while has_more:
-                query_params = {"database_id": database_id}
-                if start_cursor:
-                    query_params["start_cursor"] = start_cursor
-
-                results = self.client.databases.query(**query_params)
-
-                for page in results.get('results', []):
-                    page_docs = await self._extract_page(page['id'])
-                    documents.extend(page_docs)
-
-                has_more = results.get('has_more', False)
-                start_cursor = results.get('next_cursor')
-
-            if not documents:
-                logger.warning(f"No pages found in Notion database {database_id}")
-
-        except APIResponseError as e:
-            if e.status == 404:
-                raise ValueError(f"Notion database '{database_id}' not found. Check if the ID is correct and your integration has access.")
-            elif e.status == 403:
-                raise ValueError(f"Access denied to Notion database '{database_id}'. Share the database with your integration.")
-            raise ValueError(f"Notion database query failed: {str(e)[:200]}")
-        except Exception as e:
-            logger.error(f"Error extracting Notion database {database_id}: {e}")
-            raise ValueError(f"Failed to extract Notion database: {str(e)[:200]}")
-
-        return documents
-    
-    async def _extract_page(self, page_id: str) -> List[Dict[str, Any]]:
-        """Extract content from a single Notion page"""
-        try:
-            # Get page properties
             page = self.client.pages.retrieve(page_id=page_id)
-            
-            # Get page blocks (content)
             blocks = self.client.blocks.children.list(block_id=page_id)
             
-            # Extract text from blocks
             content_parts = []
             for block in blocks.get('results', []):
                 text = self._extract_block_text(block)
@@ -141,40 +103,56 @@ class NotionSource(BaseDataSource):
                     content_parts.append(text)
             
             content = '\n\n'.join(content_parts)
-            
-            # Get page title
-            title = self._get_page_title(page)
-            
-            return [{
+            if not content.strip():
+                return
+
+            yield {
                 'content': content,
                 'metadata': {
                     'source': self.source_name,
                     'page_id': page_id,
-                    'title': title,
+                    'title': self._get_page_title(page),
                     'type': 'notion_page',
-                    'url': page.get('url', '')
+                    'url': page.get('url', ''),
+                    'created_time': page.get('created_time'),
+                    'last_edited_time': page.get('last_edited_time')
                 }
-            }]
-        
+            }
         except Exception as e:
-            logger.error(f"Error extracting Notion page {page_id}: {e}")
-            return []
+            logger.warning(f"Failed to extract Notion page {page_id}: {e}")
     
     def _extract_block_text(self, block: Dict) -> str:
-        """Extract text from a Notion block"""
+        """Extract text from a Notion block with Markdown formatting"""
         block_type = block.get('type')
+        if not block_type: return ""
         
-        if not block_type:
-            return ""
+        data = block.get(block_type, {})
+        text = ""
         
-        block_content = block.get(block_type, {})
+        if 'rich_text' in data:
+            text = "".join(rt.get('plain_text', '') for rt in data['rich_text'])
         
-        # Handle different block types
-        if 'rich_text' in block_content:
-            texts = [rt.get('plain_text', '') for rt in block_content['rich_text']]
-            return ' '.join(texts)
-        
-        return ""
+        if not text: return ""
+
+        # Format based on type
+        if block_type == 'heading_1': return f"# {text}"
+        if block_type == 'heading_2': return f"## {text}"
+        if block_type == 'heading_3': return f"### {text}"
+        if block_type == 'bulleted_list_item': return f"* {text}"
+        if block_type == 'numbered_list_item': return f"1. {text}"
+        if block_type == 'to_do':
+            check = "[x]" if data.get('checked') else "[ ]"
+            return f"{check} {text}"
+        if block_type == 'toggle': return f"> {text}"
+        if block_type == 'quote': return f"> {text}"
+        if block_type == 'code':
+            lang = data.get('language', '')
+            return f"```{lang}\n{text}\n```"
+        if block_type == 'callout':
+            icon = data.get('icon', {}).get('emoji', 'ℹ️')
+            return f"> {icon} {text}"
+            
+        return text
     
     def _get_page_title(self, page: Dict) -> str:
         """Extract title from page properties"""

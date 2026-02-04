@@ -174,10 +174,13 @@ class DatabaseSource(BaseDataSource):
 
             # Discovery or build query
             if not query and not table:
-                # Discovery: find all tables in current schema
-                cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+                # Discovery: find all tables in public schema
+                cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")
                 tables = [row['table_name'] for row in cursor.fetchall()]
-                logger.info(f"Discovered PostgreSQL tables: {tables}")
+                if not tables:
+                    logger.warning("No tables discovered in 'public' schema")
+                else:
+                    logger.info(f"Discovered PostgreSQL tables: {tables}")
             else:
                 tables = [table] if table else [None]
 
